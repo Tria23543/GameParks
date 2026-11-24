@@ -171,7 +171,9 @@ final class GPChip: UIButton {
 
 // MARK: - List row (settings / host actions)
 
-final class GPRow: UIControl {
+/// A settings/list row. Not final: screens subclass it to carry a
+/// model object with the row (e.g. Home's game rows carry their app).
+class GPRow: UIControl {
     let titleLabel = GPLabel("", font: GPTheme.body(15, weight: .semibold), color: GPTheme.ink, lines: 2)
     let subtitleLabel = GPLabel("", font: GPTheme.body(12, weight: .semibold), color: GPTheme.mut, lines: 2)
     let valueLabel = GPLabel("", font: GPTheme.body(13, weight: .bold), color: GPTheme.accent)
