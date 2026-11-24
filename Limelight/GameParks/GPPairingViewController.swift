@@ -29,6 +29,10 @@ final class GPPairingViewController: UIViewController {
     // restored on dismissal instead of being nil-ed out.
     private var savedOnPairingPIN: ((String) -> Void)?
     private var savedOnPairingResult: ((Bool, String?) -> Void)?
+    // B-14: the ownership token this sheet stamps on the session
+    // when it installs its callbacks — dismissal restores the saved
+    // callbacks only while the token is still this sheet's.
+    private let callbackToken = NSObject()
     // A-52: the displayed PIN does not wait forever.
     private var pinTimeoutWorkItem: DispatchWorkItem?
 
@@ -90,6 +94,7 @@ final class GPPairingViewController: UIViewController {
         let session = GPSessionController.shared()
         savedOnPairingPIN = session.onPairingPIN
         savedOnPairingResult = session.onPairingResult
+        session.pairingCallbackOwner = callbackToken
         session.onPairingPIN = { [weak self] pin in
             self?.showPIN(pin)
         }
@@ -161,7 +166,18 @@ final class GPPairingViewController: UIViewController {
         messageLabel.text = "Contacting your PC…"
         spinner.isHidden = false
         spinner.startAnimating()
-        GPSessionController.shared().pairSelectedHost()
+        let session = GPSessionController.shared()
+        // A-52: this button is revealed while a pairing may STILL
+        // be in progress (the PIN timeout fires mid-attempt), and
+        // the session's pairing claim is a no-op in that state —
+        // so cancel the in-flight attempt first, or the retry
+        // silently did nothing. The new attempt's PIN re-arms the
+        // PIN timeout when it arrives (see showPIN).
+        session.cancelPairing()
+        // B-14: pair THIS sheet's host — re-select it first, in
+        // case the selection moved while the sheet was up.
+        session.selectHost(host)
+        session.pairSelectedHost()
     }
 
     private func showResult(success: Bool, message: String?) {
@@ -199,9 +215,16 @@ final class GPPairingViewController: UIViewController {
         pinTimeoutWorkItem?.cancel()
         pinTimeoutWorkItem = nil
         // A-51: hand the callback slots back to whoever had them.
+        // B-14: …but only if the slots are still THIS sheet's — if
+        // a newer owner installed its own callbacks while this
+        // sheet was up, restoring the saved ones would silently
+        // replace them (the mirror image of A-51).
         let session = GPSessionController.shared()
-        session.onPairingPIN = savedOnPairingPIN
-        session.onPairingResult = savedOnPairingResult
+        if session.pairingCallbackOwner === callbackToken {
+            session.onPairingPIN = savedOnPairingPIN
+            session.onPairingResult = savedOnPairingResult
+            session.pairingCallbackOwner = nil
+        }
         dismiss(animated: true)
     }
 }
