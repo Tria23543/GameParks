@@ -20,56 +20,125 @@ static const int MAX_ATTEMPTS = 5;
 
 - (void) main {
     BOOL success = NO;
+    // GP v2.7 (C-05): the outcome this operation reports to the
+    // manager when it finishes. Only DefinitiveNoArt (a 4xx, or a
+    // final 200 whose body never decodes) may stamp the no-art
+    // memory; transport errors, 5xx and write failures stay
+    // OtherFailure so a recovered host is re-asked on the next
+    // trigger instead of being suppressed for an hour.
+    AppAssetRetrievalOutcome outcome = AppAssetRetrievalOutcomeOtherFailure;
     int attempts = 0;
     while (![self isCancelled] && attempts++ < MAX_ATTEMPTS) {
         HttpManager* hMan = [[HttpManager alloc] initWithHost:_host];
         AppAssetResponse* appAssetResp = [[AppAssetResponse alloc] init];
         [hMan executeRequestSynchronously:[HttpRequest requestForResponse:appAssetResp withUrlRequest:[hMan newAppAssetRequestWithAppId:self.app.id]]];
 
+        // Whether THIS attempt proved the host has no art for this
+        // app via a 200 with an undecodable body; reset per attempt
+        // so only the final attempt's result decides the outcome if
+        // the retry budget runs out.
+        BOOL attemptProvedNoArt = NO;
+
+        // GP v2.7 (C-09, also the B-20 re-open): the HTTP status
+        // check is hoisted ABOVE the data check. A 4xx is permanent
+        // — retrying cannot help — so break at once, regardless of
+        // whether the response carried a body. (Previously the
+        // break sat inside if (data != nil) and data was forced nil
+        // for empty bodies, so Sunshine's normal no-art shape — a
+        // bare 404 with no body — was retried all 5 attempts.)
+        NSInteger statusCode = appAssetResp.statusCode;
+        if (statusCode >= 400 && statusCode < 500) {
+            outcome = AppAssetRetrievalOutcomeDefinitiveNoArt;
+            break;
+        }
+
         // GP v2.6 (B-02): an empty body is no body at all — v2.5's
         // data != nil test let a 0-byte 200 response be written as a
         // "cover" that no existence check would ever re-fetch.
         NSData *data = (appAssetResp.data.length > 0) ? appAssetResp.data : nil;
-        if (data != nil) {
+        if (statusCode == 200 && data != nil) {
             // GP v2.5 (A-02): only a real 200 body is box art. An error
-            // body must never be cached.
-            // GP v2.6 (B-20): a 4xx is permanent — retrying cannot
-            // help, so stop at once. A 5xx (Sunshine busy or
-            // restarting) is transient: fall through to the retry
-            // below and use the existing attempt budget.
-            if (appAssetResp.statusCode != 200) {
-                if (appAssetResp.statusCode >= 400 && appAssetResp.statusCode < 500) {
-                    break;
-                }
-            } else {
-                // GP v2.6 (B-02): status alone is not enough — only
-                // bytes that actually decode as an image may be
-                // written as box art. A 200 HTML/XML error page or a
-                // truncated body must never reach the disk cache;
-                // a decode failure is treated as a failed attempt
-                // (a truncated body may complete on a retry).
-                UIImage *probe = [UIImage imageWithData:data];
-                if (probe != nil && probe.size.width > 0 && probe.size.height > 0) {
-                    // GP v2.5 (A-64): a cancelled retriever must not write.
-                    if ([self isCancelled]) {
-                        break;
-                    }
-                    // GP v2.5 (A-67): path from the host this retriever was
-                    // given (_host), via the manager's host-explicit variant.
-                    NSString* boxArtPath = [AppAssetManager boxArtPathForApp:self.app host:_host];
-                    [[NSFileManager defaultManager] createDirectoryAtPath:[boxArtPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-                    // GP v2.5 (A-04): atomic write, result checked; the
-                    // callback below reports success only when this wrote.
-                    success = [data writeToFile:boxArtPath atomically:YES];
-                    break;
-                }
+            // body must never be cached. (5xx and transport failures
+            // fall past this block to the retry below: a 5xx —
+            // Sunshine busy or restarting — is transient and uses the
+            // existing attempt budget.)
+            // GP v2.6 (B-02): status alone is not enough — only
+            // bytes that actually decode as an image may be
+            // written as box art. A 200 HTML/XML error page or a
+            // truncated body must never reach the disk cache.
+            UIImage *probe = [UIImage imageWithData:data];
+            // GP v2.7 (C-04): UIImage decoding is lazy and -size
+            // comes from the header, so the old probe let a
+            // header-valid truncated body pass. Force a real decode
+            // by rendering the probe at its full size into a bitmap
+            // context; a failed render means the body does not
+            // decode and must not be written.
+            BOOL decodable = NO;
+            if (probe != nil && probe.size.width > 0 && probe.size.height > 0) {
+                UIGraphicsBeginImageContextWithOptions(probe.size, YES, 1.0);
+                [probe drawInRect:CGRectMake(0, 0, probe.size.width, probe.size.height)];
+                UIImage *rendered = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+                decodable = (rendered != nil);
             }
+            if (decodable) {
+                // GP v2.5 (A-64): a cancelled retriever must not write.
+                if ([self isCancelled]) {
+                    break;
+                }
+                // GP v2.7 (C-01): a retriever created before an
+                // app-list signature change must not write its
+                // pre-change art after the change, even if the
+                // cancellation landed after the isCancelled check
+                // above — the manager bumped the host's art epoch
+                // when the signature changed, so a moved epoch
+                // skips the write (the manager has already queued
+                // a fresh retriever for the current art).
+                if (self.artEpochStillCurrentBlock != nil && !self.artEpochStillCurrentBlock()) {
+                    break;
+                }
+                // GP v2.5 (A-67): path from the host this retriever was
+                // given (_host), via the manager's host-explicit variant.
+                NSString* boxArtPath = [AppAssetManager boxArtPathForApp:self.app host:_host];
+                [[NSFileManager defaultManager] createDirectoryAtPath:[boxArtPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+                // GP v2.5 (A-04): atomic write, result checked; the
+                // callback below reports success only when this wrote.
+                success = [data writeToFile:boxArtPath atomically:YES];
+                if (success) {
+                    outcome = AppAssetRetrievalOutcomeWroteFile;
+                } else {
+                    // A write failure is a transient failure, never
+                    // proof of no art — clear any definitive outcome
+                    // an earlier attempt in this loop recorded.
+                    outcome = AppAssetRetrievalOutcomeOtherFailure;
+                }
+                break;
+            }
+            // A 200 whose body does not decode: possibly a truncated
+            // transfer that completes on a retry, so fall through to
+            // the retry below — but remember this attempt proved
+            // no-art, so if the budget runs out on undecodable 200s
+            // the outcome is definitive (GP v2.7, C-05).
+            attemptProvedNoArt = YES;
         }
 
-        if (![self isCancelled]) {
+        if (attemptProvedNoArt) {
+            outcome = AppAssetRetrievalOutcomeDefinitiveNoArt;
+        } else if (outcome == AppAssetRetrievalOutcomeDefinitiveNoArt) {
+            // A later attempt failed some other way (transport, 5xx,
+            // empty body): the undecodable-200 evidence is stale.
+            outcome = AppAssetRetrievalOutcomeOtherFailure;
+        }
+
+        // GP v2.7 (C-26): sleep only when another attempt will
+        // actually follow — after the final failed attempt the old
+        // code still slept the full delay, holding a queue slot
+        // ~2 s longer than necessary.
+        if (![self isCancelled] && attempts < MAX_ATTEMPTS) {
             [NSThread sleepForTimeInterval:RETRY_DELAY];
         }
     }
+    self.retrievalOutcome = outcome;
     // GP v2.5 (A-65): report success/failure, not unconditional success.
     BOOL wrote = success;
     dispatch_async(dispatch_get_main_queue(), ^{

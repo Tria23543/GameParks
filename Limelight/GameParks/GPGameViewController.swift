@@ -99,8 +99,12 @@ final class GPGameViewController: GPBaseViewController {
     @objc private func stateChanged() {
         let hosts = GPSessionController.shared().hosts
         // A-77: nil/empty UUID falls back to a name match.
+        // C-23: the name fallback now engages whenever the UUID
+        // match fails, not only when the captured UUID is empty —
+        // a server-side UUID rewrite otherwise froze this page on
+        // the stale host object. UUID match still comes first.
         guard let currentHost = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
-            ?? (hostUUID.isEmpty ? hosts.first(where: { $0.name == hostName }) : nil) else {
+            ?? hosts.first(where: { $0.name == hostName }) else {
             markUnavailable()
             return
         }
@@ -181,7 +185,7 @@ final class GPGameViewController: GPBaseViewController {
         banner.clipsToBounds = true
         banner.translatesAutoresizingMaskIntoConstraints = false
         banner.heightAnchor.constraint(equalToConstant: 190).isActive = true
-        if let cover = GPCatalog.coverImage(for: app) {
+        if let cover = GPCatalog.coverImage(for: app, host: host) {
             let imageView = UIImageView(image: cover)
             imageView.contentMode = .scaleAspectFill
             imageView.clipsToBounds = true

@@ -40,7 +40,10 @@ extern NSString * const GPHostInfoErrorMessageKey;
 
 /// The host the screens are focused on. Re-resolved by UUID whenever
 /// the host list is replaced, so it always points at a live instance.
-@property (nonatomic, nullable) TemporaryHost *selectedHost;
+/// GP v2.7 (C-22): readonly publicly — the synthesized setter used
+/// to bypass the A-55 generation bump in setSelectedHostInternal:,
+/// so external callers must go through selectHost:/activateHost:.
+@property (nonatomic, readonly, nullable) TemporaryHost *selectedHost;
 
 @property (nonatomic, readonly, nullable) DiscoveryManager *discoveryManager;
 

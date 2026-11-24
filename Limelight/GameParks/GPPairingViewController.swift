@@ -92,14 +92,31 @@ final class GPPairingViewController: UIViewController {
         ])
 
         let session = GPSessionController.shared()
-        savedOnPairingPIN = session.onPairingPIN
-        savedOnPairingResult = session.onPairingResult
-        session.pairingCallbackOwner = callbackToken
-        session.onPairingPIN = { [weak self] pin in
-            self?.showPIN(pin)
+        // C-17: snapshot and install only while the slots are
+        // free (no owner) or already this sheet's. If another
+        // sheet owns them, its closures are not this sheet's to
+        // snapshot: saving them here would make this sheet's
+        // dismissal "restore" that sheet's dead [weak self]
+        // closures instead of the callbacks that predated it.
+        // Leaving the slots and the owner untouched also keeps
+        // cleanupAndDismiss honest — its token check cannot
+        // match this sheet, so it restores nothing on the way
+        // out. If the slots are already this sheet's (a repeated
+        // load), the originals saved on the first install are
+        // kept — the closures below are this sheet's own, not
+        // originals worth saving.
+        if session.pairingCallbackOwner == nil {
+            savedOnPairingPIN = session.onPairingPIN
+            savedOnPairingResult = session.onPairingResult
+            session.pairingCallbackOwner = callbackToken
         }
-        session.onPairingResult = { [weak self] success, message in
-            self?.showResult(success: success, message: message)
+        if session.pairingCallbackOwner === callbackToken {
+            session.onPairingPIN = { [weak self] pin in
+                self?.showPIN(pin)
+            }
+            session.onPairingResult = { [weak self] success, message in
+                self?.showResult(success: success, message: message)
+            }
         }
 
         // Two outcomes arrive outside the pairing callbacks: the

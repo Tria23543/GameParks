@@ -135,14 +135,126 @@ final class GPLibraryViewController: GPBaseViewController {
         if !spacelessQuery.isEmpty && spacelessName.contains(spacelessQuery) { return true }
         // (b) initialism: "gta" prefixes the initials of
         // "grand theft auto v" ("gtav").
+        // C-19: the name's initialism and the query's spaceless
+        // form are both built with their trailing numeral
+        // normalised roman ↔ arabic (V=5, II=2, …), so the
+        // compound abbreviation+number queries A-23 still missed
+        // — "gta 5" / "gta5" against "Grand Theft Auto V",
+        // "cod 2" against "Call of Duty 2" — match too. The
+        // discipline is unchanged: ≥2 characters, prefix-only,
+        // no other path can match.
         if spacelessQuery.count >= 2 {
-            let initials = nameTokens.compactMap { $0.first }.map(String.init).joined()
-            if initials.hasPrefix(spacelessQuery) { return true }
+            let initialsForms = Self.initialismForms(nameTokens: nameTokens)
+            let queryForms = Self.spacelessQueryForms(queryTokens: queryTokens, spacelessQuery: spacelessQuery)
+            if initialsForms.contains(where: { initials in
+                queryForms.contains(where: { initials.hasPrefix($0) })
+            }) { return true }
         }
         // (b′) every query token prefixes some name token.
         return !queryTokens.isEmpty && queryTokens.allSatisfy { queryToken in
             nameTokens.contains { $0.hasPrefix(queryToken) }
         }
+    }
+
+    // MARK: - C-19 numeral normalisation for initialism matching
+
+    /// Roman ↔ arabic for the trailing numerals of game titles
+    /// (sequels rarely go past XX in this library).
+    private static let romanToArabic: [String: String] = [
+        "i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5",
+        "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10",
+        "xi": "11", "xii": "12", "xiii": "13", "xiv": "14", "xv": "15",
+        "xvi": "16", "xvii": "17", "xviii": "18", "xix": "19", "xx": "20",
+    ]
+    private static let arabicToRoman: [String: String] = [
+        "1": "i", "2": "ii", "3": "iii", "4": "iv", "5": "v",
+        "6": "vi", "7": "vii", "8": "viii", "9": "ix", "10": "x",
+        "11": "xi", "12": "xii", "13": "xiii", "14": "xiv", "15": "xv",
+        "16": "xvi", "17": "xvii", "18": "xviii", "19": "xix", "20": "xx",
+    ]
+
+    /// The arabic form of a token that is wholly a numeral
+    /// ("v" → "5", "2" → "2"), else nil.
+    private static func arabicForm(of token: String) -> String? {
+        if let roman = romanToArabic[token] { return roman }
+        if !token.isEmpty, token.allSatisfy({ $0.isNumber }), let value = Int(token) {
+            return String(value)
+        }
+        return nil
+    }
+
+    /// The roman form of a token that is wholly a numeral
+    /// ("5" → "v", "ii" → "ii"), else nil.
+    private static func romanForm(of token: String) -> String? {
+        if romanToArabic[token] != nil { return token }
+        if !token.isEmpty, token.allSatisfy({ $0.isNumber }), let value = Int(token) {
+            return arabicToRoman[String(value)]
+        }
+        return nil
+    }
+
+    /// The name's initialism, with a trailing numeral token
+    /// carried in BOTH numeral forms: "grand theft auto v" →
+    /// ["gta5", "gtav"], "call of duty 2" → ["cod2", "codii"].
+    /// A name with no trailing numeral keeps its plain
+    /// initialism ("grand theft auto" → ["gta"]), exactly the
+    /// A-23 form.
+    private static func initialismForms(nameTokens: [String]) -> [String] {
+        let plain = nameTokens.compactMap { $0.first }.map(String.init).joined()
+        guard nameTokens.count >= 2, let last = nameTokens.last,
+              let arabic = arabicForm(of: last), let roman = romanForm(of: last) else {
+            return [plain]
+        }
+        let prefix = nameTokens.dropLast().compactMap { $0.first }.map(String.init).joined()
+        guard !prefix.isEmpty else { return [plain] }
+        return [prefix + arabic, prefix + roman]
+    }
+
+    /// The query's spaceless form, plus the same form with its
+    /// trailing numeral swapped to the other numeral system:
+    /// "gta 5" (tokens) and "gta5" (one token) both yield
+    /// ["gta5", "gtav"]; "gtav" yields ["gtav", "gta5"]. The
+    /// original form is always included, so every A-23 match
+    /// through the plain initialism still matches.
+    private static func spacelessQueryForms(queryTokens: [String], spacelessQuery: String) -> [String] {
+        var forms = [spacelessQuery]
+        func addForms(base: String, numeralToken: String) {
+            guard !base.isEmpty else { return }
+            if let arabic = arabicForm(of: numeralToken) {
+                let form = base + arabic
+                if !forms.contains(form) { forms.append(form) }
+            }
+            if let roman = romanForm(of: numeralToken) {
+                let form = base + roman
+                if !forms.contains(form) { forms.append(form) }
+            }
+        }
+        // Token-aware: "gta 5" / "gta v" — the numeral is its own
+        // query token.
+        if queryTokens.count >= 2, let last = queryTokens.last,
+           arabicForm(of: last) != nil || romanForm(of: last) != nil {
+            addForms(base: queryTokens.dropLast().joined(), numeralToken: last)
+        }
+        // Spaceless trailing arabic digits: "gta5", "cod2".
+        let digitCount = spacelessQuery.reversed().prefix(while: { $0.isNumber }).count
+        if digitCount > 0 && digitCount < spacelessQuery.count {
+            addForms(base: String(spacelessQuery.dropLast(digitCount)),
+                     numeralToken: String(spacelessQuery.suffix(digitCount)))
+        } else if digitCount == 0 {
+            // Spaceless trailing roman numeral: "gtav", "codii" —
+            // the longest roman suffix that is a whole numeral.
+            let maxSuffix = min(5, spacelessQuery.count - 1)
+            if maxSuffix >= 1 {
+                for length in stride(from: maxSuffix, through: 1, by: -1) {
+                    let suffix = String(spacelessQuery.suffix(length))
+                    if romanToArabic[suffix] != nil {
+                        addForms(base: String(spacelessQuery.dropLast(length)), numeralToken: suffix)
+                        break
+                    }
+                }
+            }
+        }
+        return forms
     }
 
     /// B-13: entry point for Home's "See all" posters — each rail
@@ -279,7 +391,7 @@ final class GPLibraryViewController: GPBaseViewController {
             let info = GPCatalog.info(for: app)
             row.configure(name: app.name ?? "",
                           subtitle: info.sourceTag,
-                          cover: GPCatalog.coverImage(for: app))
+                          cover: GPCatalog.coverImage(for: app, host: host))
             row.accessibilityIdentifier = GPCatalog.appKey(host: host, app: app)
             row.appKey = GPCatalog.appKey(host: host, app: app)
             row.addTarget(self, action: #selector(appRowTapped(_:)), for: .touchUpInside)

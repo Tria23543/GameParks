@@ -449,9 +449,13 @@ final class GPConnectingViewController: GPBaseViewController {
         // this a permanent no-op for an empty UUID (and froze it
         // the same way if the server ever rewrote the UUID), so
         // the whole launch ran on a stale host object.
+        // C-23: the name fallback now engages whenever the UUID
+        // match fails, not only when the captured UUID is empty —
+        // a server-side UUID rewrite otherwise kept the freeze
+        // B-35 described. UUID match still comes first.
         let hosts = GPSessionController.shared().hosts
         if let current = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
-            ?? (hostUUID.isEmpty ? hosts.first(where: { $0.name == hostName }) : nil) {
+            ?? hosts.first(where: { $0.name == hostName }) {
             host = current
         }
     }

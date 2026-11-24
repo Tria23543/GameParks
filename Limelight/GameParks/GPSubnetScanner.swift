@@ -137,6 +137,16 @@ import Foundation
             lock.unlock()
         }
 
+        /// GP v2.7 (C-18): the same abandonment flag, read by the
+        /// shouldAddToDiscovery closure in validate — abandoning a
+        /// timed-out validation must also stop its orphaned
+        /// discoverHost from adding the host to the discovery queue.
+        var isAbandoned: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return abandoned
+        }
+
         var host: TemporaryHost? {
             lock.lock()
             defer { lock.unlock() }
@@ -161,7 +171,7 @@ import Foundation
             discoveryManager.discoverHost(address, withCallback: { host, _ in
                 box.store(host)
                 semaphore.signal()
-            }, shouldAddToDiscovery: { isCurrent() })
+            }, shouldAddToDiscovery: { !box.isAbandoned && isCurrent() })
         }
         guard semaphore.wait(timeout: .now() + Self.validationTimeout) == .success else {
             box.abandon()

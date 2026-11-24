@@ -82,9 +82,13 @@ final class GPHostViewController: GPBaseViewController {
         reconnectInProgress = false
         // A-77: a nil/empty UUID is unmatchable by UUID — fall back
         // to the host's name rather than never matching.
+        // C-23: the name fallback now engages whenever the UUID
+        // match fails, not only when the captured UUID is empty —
+        // a server-side UUID rewrite otherwise froze this page on
+        // the stale host object. UUID match still comes first.
         let hosts = GPSessionController.shared().hosts
         if let current = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
-            ?? (hostUUID.isEmpty ? hosts.first(where: { $0.name == hostName }) : nil) {
+            ?? hosts.first(where: { $0.name == hostName }) {
             host = current
             // B-09: a successful re-resolution clears the
             // unavailable latch — if the PC came back, the page
@@ -272,7 +276,7 @@ final class GPHostViewController: GPBaseViewController {
                     let row = GPAppRow()
                     row.configure(name: app.name ?? "",
                                   subtitle: GPCatalog.info(for: app).sourceTag,
-                                  cover: GPCatalog.coverImage(for: app))
+                                  cover: GPCatalog.coverImage(for: app, host: host))
                     row.accessibilityIdentifier = GPCatalog.appKey(host: host, app: app)
                     row.appKey = GPCatalog.appKey(host: host, app: app)
                     row.addTarget(self, action: #selector(appRowTapped(_:)), for: .touchUpInside)
@@ -327,6 +331,15 @@ final class GPHostViewController: GPBaseViewController {
         // The tab bar is the navigation stack's root, not an
         // ancestor of this pushed screen — reach it through the stack.
         if let tabBar = navigationController?.viewControllers.first as? GPTabBarController {
+            // C-20: mirror the Home rails' B-13 pattern — this row
+            // counts ALL of the host's games, so select Library's
+            // full-list filter (the rails' "all") before switching
+            // tabs, instead of landing on a retained
+            // Classics/Favourites filter showing a subset or none.
+            if let controllers = tabBar.viewControllers, controllers.count > 1,
+               let library = controllers[1] as? GPLibraryViewController {
+                library.showFilter(named: "all")
+            }
             navigationController?.popToRootViewController(animated: false)
             tabBar.selectedIndex = 1
         }

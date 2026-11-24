@@ -54,7 +54,11 @@ final class GPStats {
     /// data" tile and the per-game totals must not shrink when the
     /// record list is pruned either.
     private var lifetimeStreamedBits: Double = 0
-    private var lifetimePerGame: [String: (name: String, seconds: TimeInterval)] = [:]
+    /// C-21: the per-game aggregate also carries the game's
+    /// last-played date (the end of its most recent session), so
+    /// "Last played" survives record pruning like the other
+    /// per-game figures instead of reverting to "Never".
+    private var lifetimePerGame: [String: (name: String, seconds: TimeInterval, lastPlayed: Date?)] = [:]
 
     private init() {
         records = Self.load()
@@ -116,9 +120,17 @@ final class GPStats {
         lifetimeSeconds += record.duration
         lifetimeSessions += 1
         lifetimeStreamedBits += record.duration * Double(record.bitrateKbps) * 1000.0
-        var gameEntry = lifetimePerGame[record.appKey] ?? (name: record.appName, seconds: 0)
+        var gameEntry = lifetimePerGame[record.appKey] ?? (name: record.appName, seconds: 0, lastPlayed: nil)
         gameEntry.seconds += record.duration
         gameEntry.name = record.appName
+        // C-21: session end is when this aggregate's last-played
+        // date advances — the session's end (A-45), never backwards.
+        let sessionEnd = record.start.addingTimeInterval(record.duration)
+        if let existing = gameEntry.lastPlayed {
+            gameEntry.lastPlayed = max(existing, sessionEnd)
+        } else {
+            gameEntry.lastPlayed = sessionEnd
+        }
         lifetimePerGame[record.appKey] = gameEntry
         saveAggregates()
         // Keep the store bounded and reasonably recent. Pruning
@@ -229,6 +241,12 @@ final class GPStats {
     }
 
     func lastPlayed(forAppKey key: String) -> Date? {
+        // C-21: read the pruning-proof lifetime aggregate first.
+        if let aggregated = lifetimePerGame[key]?.lastPlayed {
+            return aggregated
+        }
+        // Fall back to the records only for data the aggregates
+        // predate (an aggregate entry with no last-played date).
         // A-45: when the most recent session *ended*, not started.
         guard let latest = records.filter({ $0.appKey == key }).max(by: { $0.start < $1.start }) else {
             return nil
@@ -283,12 +301,29 @@ final class GPStats {
                let perGame = dict["perGame"] as? [[String: Any]] {
                 lifetimeStreamedBits = bits
                 lifetimePerGame = [:]
+                // C-21: an aggregates record written before the
+                // last-played date existed has no "lastPlayed" in
+                // its per-game entries — seed those from the
+                // records still on disk (assignment into the fresh
+                // dictionary, like the other seeds: no double-count
+                // on repeated init) and persist them.
+                var seededLastPlayed = false
                 for entry in perGame {
                     if let key = entry["key"] as? String,
                        let name = entry["name"] as? String,
                        let gameSeconds = entry["seconds"] as? Double {
-                        lifetimePerGame[key] = (name: name, seconds: gameSeconds)
+                        var lastPlayed: Date?
+                        if let lastPlayedTs = entry["lastPlayed"] as? Double {
+                            lastPlayed = Date(timeIntervalSince1970: lastPlayedTs)
+                        } else if let latest = records.filter({ $0.appKey == key }).max(by: { $0.start < $1.start }) {
+                            lastPlayed = latest.start.addingTimeInterval(latest.duration)
+                            seededLastPlayed = true
+                        }
+                        lifetimePerGame[key] = (name: name, seconds: gameSeconds, lastPlayed: lastPlayed)
                     }
+                }
+                if seededLastPlayed {
+                    saveAggregates()
                 }
             } else {
                 seedStreamedAndPerGameFromRecords()
@@ -308,16 +343,30 @@ final class GPStats {
         lifetimeStreamedBits = records.reduce(0.0) { $0 + $1.duration * Double($1.bitrateKbps) * 1000.0 }
         lifetimePerGame = [:]
         for record in records {
-            var entry = lifetimePerGame[record.appKey] ?? (name: record.appName, seconds: 0)
+            var entry = lifetimePerGame[record.appKey] ?? (name: record.appName, seconds: 0, lastPlayed: nil)
             entry.seconds += record.duration
             entry.name = record.appName
+            // C-21: seed the last-played date the same way — the
+            // end of the game's most recent record on disk.
+            let sessionEnd = record.start.addingTimeInterval(record.duration)
+            if let existing = entry.lastPlayed {
+                entry.lastPlayed = max(existing, sessionEnd)
+            } else {
+                entry.lastPlayed = sessionEnd
+            }
             lifetimePerGame[record.appKey] = entry
         }
     }
 
     private func saveAggregates() {
-        let perGame: [[String: Any]] = lifetimePerGame.map {
-            ["key": $0.key, "name": $0.value.name, "seconds": $0.value.seconds]
+        let perGame: [[String: Any]] = lifetimePerGame.map { entry in
+            var dict: [String: Any] = ["key": entry.key, "name": entry.value.name, "seconds": entry.value.seconds]
+            // C-21: persist the last-played date with the other
+            // per-game aggregates (omitted only when unknown).
+            if let lastPlayed = entry.value.lastPlayed {
+                dict["lastPlayed"] = lastPlayed.timeIntervalSince1970
+            }
+            return dict
         }
         UserDefaults.standard.set(["totalSeconds": lifetimeSeconds,
                                    "totalSessions": lifetimeSessions,

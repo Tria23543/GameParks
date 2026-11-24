@@ -313,7 +313,7 @@ final class GPHomeViewController: GPBaseViewController {
             let poster = GPPosterView()
             poster.configure(name: app.name ?? "",
                              subtitle: played > 0 ? "\(gpFormatPlaytime(played)) played" : info.sourceTag,
-                             cover: GPCatalog.coverImage(for: app))
+                             cover: GPCatalog.coverImage(for: app, host: host))
             poster.translatesAutoresizingMaskIntoConstraints = false
             poster.widthAnchor.constraint(equalToConstant: 118).isActive = true
             poster.addTarget(self, action: #selector(posterTapped(_:)), for: .touchUpInside)

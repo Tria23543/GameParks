@@ -79,7 +79,7 @@ enum GPSettingsStore {
     }
 
     static let presets: [Preset] = [
-        Preset(title: "Home Wi-Fi", detail: "1080p · 60 fps · 20 Mb/s · Auto codec",
+        Preset(title: "Home Wi-Fi", detail: "1080p HQ · 60 fps · 20 Mb/s · Auto codec",
                width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, codec: 0),
         // B-38: every preset applies codec 0 (Auto), so every
         // detail string discloses it — not just Home Wi-Fi's.

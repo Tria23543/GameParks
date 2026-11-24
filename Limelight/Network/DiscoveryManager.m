@@ -361,12 +361,19 @@
         [_pausedHosts removeObject:host];
 
         // Start discovery again. GP v2.6 (B-06): poll the queue's
-        // own instance for this UUID when there is one, so the new
-        // worker updates the host object the queue (and database
-        // saves) actually track, not a divergent copy.
+        // own instance for this UUID, so the new worker updates the
+        // host object the queue (and database saves) actually track,
+        // not a divergent copy. GP v2.7 (C-16): if the UUID is not
+        // in the queue at all, do not create a worker — falling back
+        // to the passed instance would let a resume after removal
+        // re-save the removed host to Core Data via its worker.
+        // The non-empty guard mirrors the B-06 matcher (and
+        // getHostInDiscovery: itself requires a non-empty UUID).
         if (shouldDiscover) {
-            TemporaryHost *queuedHost = [self getHostInDiscovery:host.uuid] ?: host;
-            [_opQueue addOperation:[self createWorkerForHost:queuedHost]];
+            TemporaryHost *queuedHost = host.uuid.length > 0 ? [self getHostInDiscovery:host.uuid] : nil;
+            if (queuedHost != nil) {
+                [_opQueue addOperation:[self createWorkerForHost:queuedHost]];
+            }
         }
     }
 }

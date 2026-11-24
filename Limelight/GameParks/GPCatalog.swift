@@ -239,8 +239,8 @@ enum GPCatalog {
     /// 3. nil — the views render their title tile instead.
     /// While host art is still arriving, the bundled cover (or the
     /// tile) is the placeholder.
-    static func coverImage(for app: TemporaryApp) -> UIImage? {
-        if let art = hostBoxArt(for: app) {
+    static func coverImage(for app: TemporaryApp, host: TemporaryHost) -> UIImage? {
+        if let art = hostBoxArt(for: app, host: host) {
             return art
         }
         guard let name = info(for: app).coverImageName else { return nil }
@@ -276,13 +276,19 @@ enum GPCatalog {
     /// scrolling list never pays the decode cost. When a decode
     /// lands, the normal app-list notification re-renders the
     /// screens and they pick the image up from the memory cache.
-    static func hostBoxArt(for app: TemporaryApp) -> UIImage? {
-        guard let uuid = app.host?.uuid, let appID = app.id else { return nil }
+    static func hostBoxArt(for app: TemporaryApp, host: TemporaryHost) -> UIImage? {
+        // GP v2.7 (B-21): the host is explicit, exactly as on the
+        // write side — the path and the key's UUID derive from the
+        // host the caller is rendering, never from app.host, which
+        // may be nil or point at a divergent instance while the
+        // missing-art check (which already used the explicit host)
+        // sees the file present and never re-triggers.
+        guard let uuid = host.uuid, let appID = app.id else { return nil }
         // The app name is part of the key (not just host UUID + app
         // id): if Sunshine renumbers its app ids, a renamed app must
         // not inherit the previous game's decoded cover.
         let key = "\(uuid)/\(appID)/\(app.name ?? "")" as NSString
-        let path = AppAssetManager.boxArtPath(for: app)
+        let path = AppAssetManager.boxArtPath(for: app, host: host)
         let fileDate = path.flatMap { p in
             (try? FileManager.default.attributesOfItem(atPath: p))?[.modificationDate] as? Date
         }
@@ -295,7 +301,7 @@ enum GPCatalog {
                 // stale entry and re-decode below.
                 boxArtCache.removeObject(forKey: key)
                 boxArtFileDates.removeValue(forKey: key)
-            } else {
+            } else if path.map({ FileManager.default.fileExists(atPath: $0) }) ?? false {
                 // GP v2.6 (B-11): the entry is cached but has no
                 // recorded date, or the file's date cannot be read
                 // right now. Dropping it here looped forever (drop ->
@@ -304,13 +310,23 @@ enum GPCatalog {
                 // generation; a real mtime change is still caught
                 // above whenever both dates are readable.
                 return cached
+            } else {
+                // GP v2.7 (C-06): the trust branch above still
+                // requires the file to exist. An unreadable date
+                // because the file is GONE (e.g. a B-03 signature-
+                // change deletion whose refetch found no art) must
+                // not serve the cached image for the rest of the
+                // session: drop the entry and its recorded date and
+                // return nil — the existence guard below agrees.
+                boxArtCache.removeObject(forKey: key)
+                boxArtFileDates.removeValue(forKey: key)
+                return nil
             }
         }
         guard let path = path,
               FileManager.default.fileExists(atPath: path),
               !boxArtRequested.contains(key) else { return nil }
         boxArtRequested.insert(key)
-        let host = app.host
         let decodedDate = fileDate
         boxArtDecodeQueue.async {
             var decoded: UIImage?
@@ -331,21 +347,64 @@ enum GPCatalog {
                         drawSize = CGSize(width: (drawSize.width * factor).rounded(),
                                           height: (drawSize.height * factor).rounded())
                     }
-                    // Force the decode here, on this queue, by drawing
-                    // the image once (the same trick upstream's
-                    // loadBoxArtForCaching uses against scroll jank) —
-                    // at scale 1, so the cached copy holds the source's
-                    // pixels, not a 2–3× screen-scale rendering of them.
-                    let format = UIGraphicsImageRendererFormat()
-                    format.scale = 1
-                    let renderer = UIGraphicsImageRenderer(size: drawSize, format: format)
-                    decoded = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: drawSize)) }
-                    if let decoded = decoded {
-                        cost = Int(decoded.size.width * decoded.size.height * 4)
+                    // GP v2.7 (C-04): UIImage(data:) is lazy — a
+                    // header-valid but truncated file returns a
+                    // non-nil image whose raster was never decoded,
+                    // and caching a draw of it can cache blank or
+                    // partial pixels as a permanent cover. Force the
+                    // source's full raster to decode by drawing it
+                    // into a bitmap context at its (B-11-capped)
+                    // natural size, and confirm something actually
+                    // rasterised; a draw that leaves the buffer
+                    // entirely zero produced no pixels and is a
+                    // decode failure, feeding the deletion below.
+                    var rasterised = false
+                    let probeWidth = max(1, Int(drawSize.width.rounded()))
+                    let probeHeight = max(1, Int(drawSize.height.rounded()))
+                    if let probe = CGContext(data: nil, width: probeWidth, height: probeHeight,
+                                             bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(),
+                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                        UIGraphicsPushContext(probe)
+                        image.draw(in: CGRect(x: 0, y: 0, width: probeWidth, height: probeHeight))
+                        UIGraphicsPopContext()
+                        if let buffer = probe.data {
+                            let byteCount = probe.bytesPerRow * probe.height
+                            let bytes = buffer.bindMemory(to: UInt8.self, capacity: byteCount)
+                            var index = 0
+                            while index < byteCount {
+                                if bytes[index] != 0 { rasterised = true; break }
+                                index += 1
+                            }
+                        }
+                    }
+                    if rasterised {
+                        // Force the decode here, on this queue, by drawing
+                        // the image once (the same trick upstream's
+                        // loadBoxArtForCaching uses against scroll jank) —
+                        // at scale 1, so the cached copy holds the source's
+                        // pixels, not a 2–3× screen-scale rendering of them.
+                        let format = UIGraphicsImageRendererFormat()
+                        format.scale = 1
+                        let renderer = UIGraphicsImageRenderer(size: drawSize, format: format)
+                        decoded = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: drawSize)) }
+                        if let decoded = decoded {
+                            cost = Int(decoded.size.width * decoded.size.height * 4)
+                        }
+                    } else {
+                        decodeFailed = true
                     }
                 } else {
                     decodeFailed = true
                 }
+            } else {
+                // GP v2.7 (C-03): the file existed when this decode
+                // was queued (the guard above checked), so a failed
+                // read or an empty file is a decode failure too —
+                // otherwise a 0-byte or unreadable file is never
+                // deleted, never re-fetched, and re-decoded on
+                // every rebuild as a permanent stuck tile.
+                decodeFailed = true
             }
             if decodeFailed {
                 // GP v2.6 (B-02): bytes on disk that do not decode
@@ -353,7 +412,16 @@ enum GPCatalog {
                 // the next retrieve trigger re-fetches it, instead of
                 // every existence check treating it as valid art
                 // forever.
-                try? FileManager.default.removeItem(atPath: path)
+                // GP v2.7 (C-07): re-stat before deleting — a
+                // refetch may have atomically replaced the file
+                // while this decode was queued/running, and deleting
+                // then would remove the new good file. Delete only
+                // when the file's current date still equals the
+                // date captured before the decode.
+                let currentDate = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                if currentDate == decodedDate {
+                    try? FileManager.default.removeItem(atPath: path)
+                }
             }
             DispatchQueue.main.async {
                 // The decode is no longer in flight, whatever its
@@ -362,13 +430,16 @@ enum GPCatalog {
                 boxArtRequested.remove(key)
                 guard let decoded = decoded else { return }
                 boxArtCache.setObject(decoded, forKey: key, cost: cost)
-                // GP v2.6 (B-11): if no date was captured before the
-                // decode, re-stat the file now — recording the date
-                // is what stops the next rebuild dropping this entry
-                // and re-decoding it in a loop.
-                let finalDate = decodedDate ?? (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
-                if let finalDate = finalDate {
-                    boxArtFileDates[key] = finalDate
+                // GP v2.7 (C-11): record ONLY the date captured
+                // before the decode. The v2.6 re-stat fallback bound
+                // a newer file's date to these older pixels when
+                // decodedDate was nil (file replaced mid-decode),
+                // masking the real change from every later rebuild.
+                // With no recorded date, the B-11 trust branch
+                // serves this entry for the generation and a later
+                // readable mtime comparison still re-checks it.
+                if let decodedDate = decodedDate {
+                    boxArtFileDates[key] = decodedDate
                 }
                 NotificationCenter.default.post(name: .GPAppListChanged, object: host)
             }
