@@ -226,17 +226,41 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     }
 }
 
-/// GP v2.5 (A-55): a failure may only be applied when nothing has
-/// superseded it — the operation's generation is still current (the
-/// host was not removed mid-flight) and the host is still known or
-/// selected. Concurrent same-host operations are already coalesced
-/// (A-11), so a late failure cannot race a concurrent success for
-/// the same host through these paths.
-- (BOOL)failureIsCurrentForHost:(TemporaryHost *)host generation:(NSUInteger)generation key:(NSString *)key {
+/// GP v2.5 (A-55) / v2.6 (B-05, B-34): a result — success OR
+/// failure — may only be applied when nothing has superseded the
+/// operation that produced it: the operation's generation is still
+/// current (the host was not removed, and the selection has not
+/// moved to another host, since it started — see
+/// setSelectedHostInternal:) and the passed instance IS the
+/// session's instance for that UUID (identity, not mere existence:
+/// a divergent instance's results are dropped, per B-34).
+/// Concurrent same-host operations are already coalesced (A-11),
+/// so a late result cannot race a concurrent one for the same host
+/// through these paths.
+- (BOOL)resultIsCurrentForHost:(TemporaryHost *)host generation:(NSUInteger)generation key:(NSString *)key {
     if ([self generationForHostKey:key] != generation) {
         return NO;
     }
-    return [self hostWithUUID:host.uuid] != nil || host == _selectedHost;
+    return [self hostWithUUID:host.uuid] == host || host == _selectedHost;
+}
+
+/// GP v2.6 (A-55 completion): moving the selection to a DIFFERENT
+/// host bumps the previous host's generation, so any activation or
+/// fetch still in flight for it recognises itself as superseded and
+/// drops its result instead of applying it to a host the user has
+/// left. Re-selecting the same host (including a divergent instance
+/// of the same UUID — the key is the UUID) bumps nothing.
+- (void)setSelectedHostInternal:(TemporaryHost *)host {
+    TemporaryHost *previous = _selectedHost;
+    _selectedHost = host;
+    if (previous == nil || previous == host) {
+        return;
+    }
+    NSString *previousKey = [self hostKeyForHost:previous];
+    NSString *newKey = host != nil ? [self hostKeyForHost:host] : nil;
+    if (![previousKey isEqualToString:newKey]) {
+        [self bumpGenerationForHostKey:previousKey];
+    }
 }
 
 /// GP v2.5 (A-63): fetch box art for any app of this host that lacks
@@ -278,11 +302,22 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     }
     DataManager *dataMan = [[DataManager alloc] init];
     TemporarySettings *current = [dataMan getSettings];
-    BOOL factoryDefaults = current != nil
-        && [current.bitrate intValue] == 10000
+    // GP v2.6 (B-27/A-19 principle): with no record there is nothing
+    // to inspect — leave the flag unwritten so a later launch, once
+    // a record exists, still makes the fresh-install decision.
+    if (current == nil) {
+        return;
+    }
+    BOOL factoryDefaults = [current.bitrate intValue] == 10000
         && [current.width intValue] == 1280
         && [current.height intValue] == 720;
     if (!factoryDefaults) {
+        // GP v2.6 (B-27): the record was inspected and is NOT the
+        // engine's factory defaults — a deliberate choice. Write
+        // the done-flag here too, so a host-less profile that later
+        // lands exactly on factory values is not silently
+        // re-seeded on the next launch.
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPSeededSettingsV1"];
         return;
     }
     // GP v2.5 (A-61): factory-valued settings in a profile that
@@ -320,12 +355,15 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 /// that is always visible, controller or not. The intended behaviour
 /// is Auto (1): full touch controls only while no physical controller
 /// is connected, hidden (or reduced to the buttons the controller
-/// lacks) when one is. The GameParks settings UI only ever offered a
-/// plain on/off toggle whose "on" also wrote 2, so a stored 2 can
-/// only have come from GameParks itself, never from a user choosing
-/// Simple. Rewrite exactly that value to Auto, preserving every
-/// other setting; 0 (user turned controls off) and any other value
-/// are left untouched.
+/// lacks) when one is. A stored 2 is ambiguous, though: it may be a
+/// GameParks seed, OR a deliberate Simple choice made in upstream's
+/// own settings screen (GP v2.5, A-38 — an earlier version of this
+/// comment asserted the first was the only possibility; that premise
+/// was wrong). So the rewrite below fires only when the
+/// GPGameParksWroteOscV25 provenance marker proves GameParks itself
+/// wrote the value; an unmarked 2 is left untouched — the safe
+/// direction. 0 (user turned controls off) and any other value are
+/// likewise left untouched, and every other setting is preserved.
 - (void)migrateOscToAutoIfNeeded {
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"GPMigratedOscAutoV21"]) {
         return;
@@ -335,7 +373,13 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     // early exits once inspection has happened).
     DataManager *dataMan = [[DataManager alloc] init];
     TemporarySettings *current = [dataMan getSettings];
-    if (current == nil || [current.onscreenControls intValue] != 2) {
+    // GP v2.6 (A-19): no record — nothing has been inspected, so
+    // the done-flag must NOT be written; a later launch with a
+    // record present still owes the migration decision.
+    if (current == nil) {
+        return;
+    }
+    if ([current.onscreenControls intValue] != 2) {
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPMigratedOscAutoV21"];
         return;
     }
@@ -468,11 +512,11 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 #pragma mark - Selection & activation (upstream: hostClicked:view:)
 
 - (void)selectHost:(TemporaryHost *)host {
-    _selectedHost = host;
+    [self setSelectedHostInternal:host];
 }
 
 - (void)activateHost:(TemporaryHost *)host userInitiated:(BOOL)userInitiated skipFastPath:(BOOL)skipFastPath {
-    _selectedHost = host;
+    [self setSelectedHostInternal:host];
 
     // Upstream fast path: online, paired, and a cached app list —
     // skip straight to the app list fetch.
@@ -505,19 +549,36 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             }
             sleep(1);
         }
-        if (host.state == StateUnknown) {
+        // GP v2.6 (B-24): the wait loop's abandon only breaks the
+        // loop — re-check here, before ANY network work, so a host
+        // removed during the final sleep (its state may have just
+        // resolved to Online) or a stream that just started gets no
+        // server-info round trip, fetch, or pairing attempt.
+        if ([self generationForHostKey:hostKey] != generation || self->_streamActive) {
             [self endActivationForKey:hostKey];
             return;
         }
-
-        // Don't bother polling if the server is already offline.
-        if (host.state == StateOffline) {
+        if (host.state == StateUnknown) {
             [self endActivationForKey:hostKey];
+            // GP v2.6 (B-44): this exit used to post nothing, so
+            // screens waiting on GPHostsChanged never learned the
+            // activation had ended.
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self postHostsChanged];
             });
             return;
         }
+
+        // GP v2.6 (B-07): deliberately NO early return for
+        // StateOffline (v2.5 returned here without any network I/O).
+        // The cached state is discovery-owned and may be stale; an
+        // activation is a real probe — the server-info round trip
+        // below is what re-proves the host, and the success branch
+        // restores StateOnline from it. GPConnecting's timed
+        // re-activations inside its online wait depend on this:
+        // for an Offline host they used to be no-ops, so a launch
+        // on a reachable PC could only recover if a discovery poll
+        // happened to beat the wait's deadline.
 
         HttpManager *hMan = [[HttpManager alloc] initWithHost:host];
         ServerInfoResponse *serverInfoResp = [[ServerInfoResponse alloc] init];
@@ -536,7 +597,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             [self endActivationForKey:hostKey];
             dispatch_async(dispatch_get_main_queue(), ^{
                 // GP v2.5 (A-55): never apply a stale failure.
-                if (![self failureIsCurrentForHost:host generation:generation key:hostKey]) {
+                if (![self resultIsCurrentForHost:host generation:generation key:hostKey]) {
                     return;
                 }
                 host.state = StateOffline;
@@ -549,11 +610,36 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             return;
         }
 
+        // GP v2.6 (B-05): gate successes as well as failures — if
+        // the host was removed (or the selection moved to another
+        // host) while the request was in flight, apply nothing:
+        // no populate, no ping sample, no fetch, and above all no
+        // pairing attempt for a superseded host. The generation
+        // dictionary is synchronised, so this check is safe here
+        // on the background queue; the fetch/pairing steps below
+        // re-check with full identity on the main queue.
+        if ([self generationForHostKey:hostKey] != generation) {
+            [self endActivationForKey:hostKey];
+            return;
+        }
+
         // Update the host object with this data.
         [serverInfoResp populateHost:host];
+        // GP v2.6 (B-07): populateHost: never assigns state — but a
+        // successful server-info round trip IS proof the PC is
+        // online, so activation restores StateOnline itself. (The
+        // only other Online writer is the discovery worker; the
+        // app-list failure path writing StateOffline is what used
+        // to strand a reachable host behind the A-12 gate.)
+        host.state = StateOnline;
 
         NSInteger elapsedMs = MAX((NSInteger)(-[requestStart timeIntervalSinceNow] * 1000), 1);
         dispatch_async(dispatch_get_main_queue(), ^{
+            // GP v2.6 (B-05): don't record a ping sample for a
+            // host that was superseded while this block queued.
+            if (![self resultIsCurrentForHost:host generation:generation key:hostKey]) {
+                return;
+            }
             NSMutableArray<NSNumber *> *samples = [NSMutableArray arrayWithArray:self->_pingSamplesMs[host.uuid] ?: @[]];
             [samples addObject:@(elapsedMs)];
             while (samples.count > 10) {
@@ -600,6 +686,14 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     __block NSUInteger generation = 0;
     void (^claim)(void) = ^{
         if (self->_pairingInProgress) {
+            return;
+        }
+        // GP v2.6 (B-05): never start pairing a host that is no
+        // longer the session's host — removed, or the selection
+        // moved to another PC while the activation that led here
+        // was in flight. (Runs on the main queue, like all pairing
+        // state, so the identity check reads live state.)
+        if ([self hostWithUUID:host.uuid] != host && host != self->_selectedHost) {
             return;
         }
         self->_pairingInProgress = YES;
@@ -777,6 +871,11 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         TemporaryHost *host = self->_pairingHost ?: self->_selectedHost;
         self->_pairingInProgress = NO;
         self->_pairingHost = nil;
+        // GP v2.6 (B-30): mirror the sibling exits — a stale
+        // cancelled flag from an earlier attempt must not survive
+        // into the next one, and screens are told the outcome
+        // directly, not only via the app-list post below.
+        self->_pairingCancelled = NO;
         // Discovery was stopped before the pairing attempt began.
         [self->_discMan startDiscovery];
         if (self.onPairingResult) {
@@ -785,6 +884,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         if (host != nil) {
             [self fetchAppListForHost:host];
         }
+        [self postHostsChanged];
     });
 }
 
@@ -829,7 +929,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                     [self->_fetchInFlight removeObject:fetchKey];
                 }
                 // GP v2.5 (A-55): never apply a stale failure.
-                if (![self failureIsCurrentForHost:host generation:generation key:fetchKey]) {
+                if (![self resultIsCurrentForHost:host generation:generation key:fetchKey]) {
                     return;
                 }
                 // GP: the failure is recorded and posted so the
@@ -847,6 +947,14 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         dispatch_async(dispatch_get_main_queue(), ^{
             @synchronized (self->_fetchInFlight) {
                 [self->_fetchInFlight removeObject:fetchKey];
+            }
+            // GP v2.6 (B-05): gate successes as well as failures —
+            // a list landing after the host was removed (or the
+            // selection moved on) must not rewrite its apps in
+            // Core Data, restart asset retrieval, or post change
+            // notifications for a superseded host.
+            if (![self resultIsCurrentForHost:host generation:generation key:fetchKey]) {
+                return;
             }
             [self updateAppList:[appListResp getAppList] forHost:host];
             [self->_appListErrors removeObjectForKey:host.uuid];
@@ -1004,6 +1112,22 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     }
     // Invalidate any in-flight activation/fetch for this host (A-55).
     [self bumpGenerationForHostKey:[self hostKeyForHost:host]];
+    // GP v2.6 (B-25): also drop the host's coalescing keys and any
+    // pending asset-refresh reference. The sets otherwise drain
+    // only via the in-flight operations themselves, so a host
+    // re-added under the same UUID was silently un-activatable
+    // until the stale (now generation-dead) work happened to end.
+    NSString *removedKey = [self hostKeyForHost:host];
+    @synchronized (_activationInFlight) {
+        [_activationInFlight removeObject:removedKey];
+    }
+    @synchronized (_fetchInFlight) {
+        [_fetchInFlight removeObject:removedKey];
+    }
+    if (_assetRefreshHost != nil && host.uuid != nil
+        && [_assetRefreshHost.uuid isEqualToString:host.uuid]) {
+        _assetRefreshHost = nil;
+    }
     [self postHostsChanged];
 }
 
@@ -1022,7 +1146,10 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                         [merged addObject:host];
                         self->_hosts = [self sortedHosts:merged];
                     }
-                    self->_selectedHost = [self hostWithUUID:host.uuid] ?: host;
+                    // GP v2.6 (A-55): route through the helper so
+                    // focusing the newly added host supersedes any
+                    // in-flight work for the previously selected one.
+                    [self setSelectedHostInternal:[self hostWithUUID:host.uuid] ?: host];
                     [self postHostsChanged];
                     completion(YES, nil);
                 });
@@ -1119,6 +1246,15 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     if (app.host == nil) {
         return nil;
     }
+    // GP v2.6 (B-28): a missing settings record must fail the
+    // build, not produce a zero-valued config via nil-messaging
+    // (0x0, 0 fps, 0 kbps) that sails past the caller's nil check
+    // and fails down in the engine with no GameParks message.
+    DataManager *settingsMan = [[DataManager alloc] init];
+    TemporarySettings *streamSettings = [settingsMan getSettings];
+    if (streamSettings == nil) {
+        return nil;
+    }
     StreamConfiguration *streamConfig = [[StreamConfiguration alloc] init];
     streamConfig.host = app.host.activeAddress;
     streamConfig.httpsPort = app.host.httpsPort;
@@ -1126,9 +1262,8 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     streamConfig.appName = app.name;
     streamConfig.serverCert = app.host.serverCert;
 
-    DataManager *dataMan = [[DataManager alloc] init];
-    TemporarySettings *streamSettings = [dataMan getSettings];
-
+    // streamSettings was fetched (and nil-checked) at the top —
+    // GP v2.6 (B-28).
     streamConfig.frameRate = [streamSettings.framerate intValue];
     if (@available(iOS 10.3, *)) {
         // Don't stream more FPS than the display can show
@@ -1306,17 +1441,22 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                 return byId != NSOrderedSame ? byId : [(a.name ?: @"") compare:(b.name ?: @"")];
             }];
         for (TemporaryApp *app in apps) {
-            [appsSignature appendFormat:@"%@=%@/%d,", app.id ?: @"", app.name ?: @"", app.hdrSupported ? 1 : 0];
+            // GP v2.6 (B-29): per-app hidden is rendered state
+            // (sortedApps filters on it) — a merge that changes
+            // only visibility must still change the signature.
+            [appsSignature appendFormat:@"%@=%@/%d/%d,", app.id ?: @"", app.name ?: @"", app.hdrSupported ? 1 : 0, app.hidden ? 1 : 0];
         }
-        [signature appendFormat:@"%@|%@|%d|%d|%@|%d|%hu|%@|%@|%@|%@|%@|%lu|%@;",
+        // GP v2.6 (B-29): host.address joins the field list — a
+        // poll that changes only it was previously dropped by the
+        // A-09 gate, so no screen rebuilt. (The old trailing
+        // "sel:" component is gone: both sides were computed with
+        // the same current selection, so it could never differ.)
+        [signature appendFormat:@"%@|%@|%d|%d|%@|%d|%hu|%@|%@|%@|%@|%@|%@|%lu|%@;",
          host.uuid ?: @"", host.name ?: @"", (int)host.state, (int)host.pairState,
          host.currentGame ?: @"", host.serverCodecModeSupport, host.httpsPort,
-         host.mac ?: @"", host.localAddress ?: @"", host.externalAddress ?: @"",
+         host.mac ?: @"", host.address ?: @"", host.localAddress ?: @"", host.externalAddress ?: @"",
          host.ipv6Address ?: @"", host.activeAddress ?: @"",
          (unsigned long)certHash, appsSignature];
-    }
-    if (_selectedHost != nil) {
-        [signature appendFormat:@"sel:%@", _selectedHost.uuid ?: @""];
     }
     return signature;
 }

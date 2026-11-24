@@ -54,6 +54,13 @@ extern NSString * const GPHostInfoErrorMessageKey;
 @property (nonatomic, copy, nullable) void (^onPairingPIN)(NSString *pin);
 @property (nonatomic, copy, nullable) void (^onPairingResult)(BOOL success, NSString *_Nullable message);
 
+/// GP v2.6 (B-14): ownership token for the two callback slots
+/// above. Whoever installs callbacks sets this to a token only it
+/// holds; on teardown it restores the previous callbacks ONLY if
+/// the token is still its own — otherwise a newer owner has taken
+/// the slots over and must not be clobbered by a stale restore.
+@property (nonatomic, strong, nullable) id pairingCallbackOwner;
+
 /// One-time setup: crypto, saved hosts, discovery, subnet scan.
 /// Mirrors MainFrameViewController's viewDidLoad.
 - (void)start;
@@ -117,7 +124,8 @@ extern NSString * const GPHostInfoErrorMessageKey;
 /// assignment upstream's prepareForSegue: performs. The caller
 /// pushes the returned controller onto the navigation stack,
 /// exactly like upstream's push segue "createStreamFrame".
-/// Returns nil only if the app has no host. Call on the main queue.
+/// Returns nil if the app has no host, or if the settings record
+/// is missing (GP v2.6, B-28). Call on the main queue.
 - (nullable UIViewController *)streamViewControllerForApp:(TemporaryApp *)app;
 
 /// The stream view controller was pushed / popped. Discovery pauses
