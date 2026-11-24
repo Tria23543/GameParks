@@ -31,7 +31,13 @@ jobs:
             echo "Selecting $XCODE_APP"
             sudo xcode-select -s "$XCODE_APP/Contents/Developer"
           else
-            echo "No Xcode_16*.app found; using the runner default"
+            # B-19: fail CLOSED. Falling back to the runner default
+            # is the exact failure mode this step exists to prevent
+            # (Xcode 26.3 could not resolve UIKit in run 45481380299);
+            # if the runner image no longer ships Xcode 16, stop here
+            # with a clear error instead of building on a wrong SDK.
+            echo "::error::No Xcode_16*.app found on this runner; GameParks must build with Xcode 16 — refusing to fall back to the runner default toolchain." >&2
+            exit 1
           fi
           xcodebuild -version
 
