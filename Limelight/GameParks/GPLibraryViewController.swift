@@ -420,11 +420,19 @@ final class GPLibraryViewController: GPBaseViewController {
                         // GP v2.9 (E-10): this parse invents a
                         // numeral from any word ending that spells
                         // one ("taxi" → 11, "max" → 10, "six" → 9),
-                        // so the form it adds is exact-letters: it
-                        // may only match a name form whose letters
-                        // equal the leftover, never a longer form
-                        // it merely prefixes ("ta" ✗ "Tap Titans").
-                        add(letters: String(spacelessQuery.dropLast(length)), numeral: numeral, exact: true)
+                        // so two guards apply to the form it adds:
+                        // it is exact-letters (it may only match a
+                        // name form whose letters EQUAL the
+                        // leftover, never a longer form it merely
+                        // prefixes — "ta" ✗ "Tap Titans"), and the
+                        // leftover must be at least two letters
+                        // (a one-letter leftover like "six" → "s"
+                        // would still equal a name's single-initial
+                        // form). A suffix failing the length guard
+                        // is skipped, not accepted.
+                        let leftover = String(spacelessQuery.dropLast(length))
+                        if leftover.count < 2 { continue }
+                        add(letters: leftover, numeral: numeral, exact: true)
                         spacelessCarriesNumeral = true
                         break
                     }
