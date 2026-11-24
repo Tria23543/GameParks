@@ -2,160 +2,187 @@
 //  GPStats.swift
 //  GameParks
 //
-//  Local play statistics, counted automatically as sessions happen:
-//  playtime per game, session counts, streamed data and last-played dates.
-//  Stored in UserDefaults on this phone only.
+//  Local play statistics, counted on this phone: every stream
+//  session's app, start, duration and bitrate. Backs the Stats
+//  screen and the "Played / Last played" figures on Home and the
+//  game page. Stored in UserDefaults; nothing leaves the device.
 //
 
 import Foundation
 
+struct GPSessionRecord {
+    let appKey: String
+    let appName: String
+    let start: Date
+    let duration: TimeInterval
+    let bitrateKbps: Int
+}
+
 final class GPStats {
     static let shared = GPStats()
 
-    private let defaults = UserDefaults.standard
-    private let playtimeKey = "GPStats.playtime"       // [appKey: seconds]
-    private let sessionsKey = "GPStats.sessionDates"   // [Date.timeIntervalSince1970]
-    private let lastPlayedKey = "GPStats.lastPlayed"   // [appKey: timeIntervalSince1970]
-    private let dataKey = "GPStats.dataMB"             // total MB streamed (Double)
+    private let storageKey = "GPSessionsV2"
+    private var records: [GPSessionRecord] = []
 
-    /// Serialises recording: the four stores are read-modify-write
-    /// cycles and must not interleave or lose each other's updates.
-    private let recordQueue = DispatchQueue(label: "com.gameparks.stats.record")
-    /// Bumped on every recorded session; screens include it in their
-    /// rebuild signatures so stats changes refresh them exactly once.
-    private(set) var revision = 0
+    private var activeKey: String?
+    private var activeName: String?
+    private var activeStart: Date?
+    private var activeBitrateKbps: Int = 20000
 
-    private init() {}
-
-    /// A stable per-game key. The host's app id is the real identity;
-    /// the fallbacks exist so a missing id degrades gracefully instead
-    /// of collapsing unrelated games into one bucket: install path is
-    /// unique per install, the name at least separates different games.
-    static func appKey(host: TemporaryHost, app: TemporaryApp) -> String {
-        let discriminator: String
-        if let id = app.id, !id.isEmpty {
-            discriminator = id
-        } else if let path = app.installPath, !path.isEmpty {
-            discriminator = path
-        } else if let name = app.name, !name.isEmpty {
-            discriminator = name
-        } else {
-            discriminator = "unknown"
-        }
-        return "\(host.uuid)/\(discriminator)"
+    private init() {
+        records = Self.load()
     }
 
     // MARK: - Recording
 
-    func recordSession(appKey: String, duration: TimeInterval, bitrateKbps: Int) {
-        guard duration >= 5 else {
+    func beginSession(appKey: String, appName: String, bitrateKbps: Int) {
+        activeKey = appKey
+        activeName = appName
+        activeStart = Date()
+        activeBitrateKbps = max(bitrateKbps, 1)
+    }
+
+    var hasActiveSession: Bool { activeStart != nil }
+
+    func endSession() {
+        guard let key = activeKey, let name = activeName, let start = activeStart else {
             return
         }
-        recordQueue.async { [weak self] in
-            guard let self = self else { return }
-            // One timestamp for the whole event, so the session date
-            // and last-played can never straddle a midnight boundary.
-            let end = Date()
-            let endInterval = end.timeIntervalSince1970
-
-            var playtime = self.doubleDictionary(forKey: self.playtimeKey)
-            playtime[appKey, default: 0] += duration
-            self.defaults.set(playtime, forKey: self.playtimeKey)
-
-            // Prune as we append: the raw session list must not grow
-            // for the life of the install (every read used to re-read
-            // and re-write the whole, ever-growing array).
-            let cutoff = endInterval - 365 * 24 * 3600
-            var sessions = (self.defaults.array(forKey: self.sessionsKey) as? [Double] ?? [])
-                .filter { $0 >= cutoff }
-            sessions.append(endInterval)
-            self.defaults.set(sessions, forKey: self.sessionsKey)
-
-            var lastPlayed = self.doubleDictionary(forKey: self.lastPlayedKey)
-            lastPlayed[appKey] = endInterval
-            self.defaults.set(lastPlayed, forKey: self.lastPlayedKey)
-
-            // Streamed data estimate: bitrate (kb/s) * seconds / 8 = KB,
-            // / 1000 = MB. Video bitrate only, so it is an estimate.
-            // A corrupt (zero/negative) stored bitrate must not record
-            // zero or negative data — fall back to the default.
-            let effectiveBitrate = bitrateKbps > 0 ? bitrateKbps : 20000
-            let megabytes = Double(effectiveBitrate) * duration / 8.0 / 1000.0
-            self.defaults.set(self.defaults.double(forKey: self.dataKey) + megabytes, forKey: self.dataKey)
-
-            self.revision += 1
+        let duration = Date().timeIntervalSince(start)
+        activeKey = nil
+        activeName = nil
+        activeStart = nil
+        guard duration >= 1 else { return }
+        records.append(GPSessionRecord(appKey: key, appName: name, start: start,
+                                       duration: duration, bitrateKbps: activeBitrateKbps))
+        // Keep the store bounded and reasonably recent.
+        let cutoff = Date().addingTimeInterval(-180 * 24 * 3600)
+        records = records.filter { $0.start > cutoff }
+        if records.count > 500 {
+            records = Array(records.suffix(500))
         }
+        save()
     }
 
-    /// Reads a [String: Double] store value by value: if any single
-    /// stored value is not a number, only that entry is dropped —
-    /// an all-or-nothing cast would reset the whole history to zero.
-    private func doubleDictionary(forKey key: String) -> [String: Double] {
-        guard let raw = defaults.dictionary(forKey: key) else {
-            return [:]
-        }
-        var result: [String: Double] = [:]
-        for (entryKey, value) in raw {
-            if let number = value as? NSNumber {
-                result[entryKey] = number.doubleValue
-            }
-        }
-        return result
+    // MARK: - Aggregates
+
+    var totalSeconds: TimeInterval {
+        records.reduce(0) { $0 + $1.duration }
     }
 
-    // MARK: - Reading
+    var sessionCount: Int {
+        records.count
+    }
 
-    func playtime(forAppKey key: String) -> TimeInterval {
-        return doubleDictionary(forKey: playtimeKey)[key] ?? 0
+    /// Estimated from each session's duration × its bitrate.
+    var totalStreamedGB: Double {
+        let bits = records.reduce(0.0) { $0 + $1.duration * Double($1.bitrateKbps) * 1000.0 }
+        return bits / 8.0 / 1_000_000_000.0
+    }
+
+    func seconds(forAppKey key: String) -> TimeInterval {
+        records.filter { $0.appKey == key }.reduce(0) { $0 + $1.duration }
     }
 
     func lastPlayed(forAppKey key: String) -> Date? {
-        guard let interval = doubleDictionary(forKey: lastPlayedKey)[key] else {
-            return nil
+        records.filter { $0.appKey == key }.map { $0.start }.max()
+    }
+
+    /// (appKey, appName, seconds) sorted by playtime, longest first.
+    func mostPlayed(limit: Int = 4) -> [(key: String, name: String, seconds: TimeInterval)] {
+        var totals: [String: (name: String, seconds: TimeInterval)] = [:]
+        for record in records {
+            var entry = totals[record.appKey] ?? (name: record.appName, seconds: 0)
+            entry.seconds += record.duration
+            entry.name = record.appName
+            totals[record.appKey] = entry
         }
-        return Date(timeIntervalSince1970: interval)
+        return totals
+            .map { (key: $0.key, name: $0.value.name, seconds: $0.value.seconds) }
+            .sorted { $0.seconds > $1.seconds }
+            .prefix(limit)
+            .map { $0 }
     }
 
-    func totalPlaytime() -> TimeInterval {
-        return doubleDictionary(forKey: playtimeKey).values.reduce(0, +)
-    }
-
-    func totalSessions() -> Int {
-        return (defaults.array(forKey: sessionsKey) as? [Double] ?? []).count
-    }
-
-    func totalDataMB() -> Double {
-        return defaults.double(forKey: dataKey)
-    }
-
-    /// Session counts for the current week, Monday first (7 values).
-    func sessionsThisWeek() -> [Int] {
-        let sessions = (defaults.array(forKey: sessionsKey) as? [Double] ?? []).map { Date(timeIntervalSince1970: $0) }
+    /// Session counts for the current week, Monday first, plus the
+    /// week's total — the Stats screen's "This week" chart.
+    func thisWeek() -> (days: [Int], total: Int) {
         var calendar = Calendar.current
         calendar.firstWeekday = 2 // Monday
-        guard let week = calendar.dateInterval(of: .weekOfYear, for: Date()) else {
-            return [Int](repeating: 0, count: 7)
+        guard let weekStart = calendar.dateInterval(of: .weekOfYear, for: Date())?.start else {
+            return ([0, 0, 0, 0, 0, 0, 0], 0)
         }
-        var counts = [Int](repeating: 0, count: 7)
-        for date in sessions where week.contains(date) {
-            // weekday: 1 = Sunday ... 7 = Saturday; convert to Monday-first index
-            let weekday = calendar.component(.weekday, from: date)
-            let index = (weekday + 5) % 7
-            counts[index] += 1
+        var days = [Int](repeating: 0, count: 7)
+        var total = 0
+        for record in records {
+            let dayIndex = calendar.dateComponents([.day], from: weekStart, to: record.start).day ?? -1
+            if dayIndex >= 0 && dayIndex < 7 {
+                days[dayIndex] += 1
+                total += 1
+            }
         }
-        return counts
+        return (days, total)
     }
 
-    func sessionsThisWeekCount() -> Int {
-        return sessionsThisWeek().reduce(0, +)
+    // MARK: - Persistence
+
+    private static func load() -> [GPSessionRecord] {
+        guard let raw = UserDefaults.standard.array(forKey: "GPSessionsV2") as? [[String: Any]] else {
+            return []
+        }
+        return raw.compactMap { dict in
+            guard let key = dict["key"] as? String,
+                  let name = dict["name"] as? String,
+                  let start = dict["start"] as? Double,
+                  let duration = dict["duration"] as? Double,
+                  let bitrate = dict["bitrate"] as? Int else {
+                return nil
+            }
+            return GPSessionRecord(appKey: key, appName: name,
+                                   start: Date(timeIntervalSince1970: start),
+                                   duration: duration, bitrateKbps: bitrate)
+        }
     }
 
-    /// Playtime ranked across all known app keys: [(appKey, seconds)] highest first.
-    func rankedPlaytime() -> [(key: String, seconds: TimeInterval)] {
-        let playtime = doubleDictionary(forKey: playtimeKey)
-        // Stable tie-break by key so equal-playtime games do not
-        // reshuffle between launches (dictionary order is not stable).
-        return playtime.map { (key: $0.key, seconds: $0.value) }
-            .sorted { $0.seconds != $1.seconds ? $0.seconds > $1.seconds : $0.key < $1.key }
+    private func save() {
+        let raw: [[String: Any]] = records.map {
+            ["key": $0.appKey, "name": $0.appName,
+             "start": $0.start.timeIntervalSince1970,
+             "duration": $0.duration, "bitrate": $0.bitrateKbps]
+        }
+        UserDefaults.standard.set(raw, forKey: storageKey)
     }
+}
+
+// MARK: - Formatting
+
+/// "12.4 h" / "45 min" / "—" for zero.
+func gpFormatPlaytime(_ seconds: TimeInterval) -> String {
+    if seconds < 60 {
+        return "—"
+    }
+    if seconds < 3600 {
+        return "\(Int(seconds / 60)) min"
+    }
+    return String(format: "%.1f h", seconds / 3600.0)
+}
+
+/// "Yesterday" / "2 days ago" / "12 Nov" style relative dates.
+func gpFormatLastPlayed(_ date: Date?) -> String {
+    guard let date = date else { return "Never" }
+    let calendar = Calendar.current
+    if calendar.isDateInToday(date) {
+        return "Today"
+    }
+    if calendar.isDateInYesterday(date) {
+        return "Yesterday"
+    }
+    let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date),
+                                       to: calendar.startOfDay(for: Date())).day ?? 0
+    if days > 1 && days < 30 {
+        return "\(days) days ago"
+    }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "d MMM yyyy"
+    return formatter.string(from: date)
 }

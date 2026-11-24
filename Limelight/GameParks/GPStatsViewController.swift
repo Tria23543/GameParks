@@ -2,47 +2,22 @@
 //  GPStatsViewController.swift
 //  GameParks
 //
-//  Stats in the approved design — your play, counted automatically:
-//  total playtime, sessions, streamed data, average home ping,
-//  most-played games and this week's sessions.
+//  The design's Stats screen, fed entirely by GPStats' on-device
+//  session records and the session controller's measured ping.
 //
 
 import UIKit
 
 final class GPStatsViewController: GPBaseViewController {
-    private let stack = UIStackView()
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-    }
+    private let dynamicStack = UIStackView()
 
     override func viewDidLoad() {
         super.viewDidLoad()
-
-        let scrollView = UIScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scrollView)
-
-        stack.axis = .vertical
-        stack.spacing = 14
-        stack.isLayoutMarginsRelativeArrangement = true
-        stack.layoutMargins = UIEdgeInsets(top: 18, left: 20, bottom: 28, right: 20)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
-        ])
-
-        NotificationCenter.default.addObserver(self, selector: #selector(rebuild), name: .gpHostsChanged, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(rebuild), name: .gpAppListChanged, object: nil)
+        contentStack.addArrangedSubview(makeHeader(title: "Stats",
+                                                   subtitle: "Your play, counted automatically"))
+        dynamicStack.axis = .vertical
+        dynamicStack.spacing = 16
+        contentStack.addArrangedSubview(dynamicStack)
         rebuild()
     }
 
@@ -51,173 +26,126 @@ final class GPStatsViewController: GPBaseViewController {
         rebuild()
     }
 
-    @objc private func rebuild() {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.rebuild() }
-            return
-        }
-        guard isViewLoaded else { return }
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+    private func rebuild() {
+        dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let stats = GPStats.shared
-        let engine = GPEngine.shared
+        let session = GPSessionController.shared
 
-        let header = UIStackView()
-        header.axis = .vertical
-        header.spacing = 3
-        header.addArrangedSubview(GPLabel("Stats", font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink))
-        header.addArrangedSubview(GPLabel("Your play, counted automatically", font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut))
-        stack.addArrangedSubview(header)
+        if stats.sessionCount == 0 {
+            let message = GPMessageView()
+            message.configure(title: "No sessions yet",
+                              message: "Play something and this page fills itself in — playtime, sessions and data are counted on this phone as you play.",
+                              actionTitle: nil)
+            dynamicStack.addArrangedSubview(message)
+        }
 
         // Tiles
-        let pingText: String
-        if let host = engine.selectedHost, let ping = engine.ping(for: host) {
-            pingText = "\(ping) ms"
-        } else {
-            pingText = "—"
-        }
-        let dataText: String
-        let dataMB = stats.totalDataMB()
-        if dataMB >= 1000 {
-            dataText = String(format: "%.1f GB", locale: Locale(identifier: "en_US_POSIX"), dataMB / 1000.0)
-        } else if dataMB < 10 {
-            // One decimal: 0.9 MB of streaming must not read as "0 MB".
-            dataText = String(format: "%.1f MB", locale: Locale(identifier: "en_US_POSIX"), dataMB)
-        } else {
-            dataText = "\(Int(dataMB)) MB"
-        }
-        let tilesRow1 = UIStackView(arrangedSubviews: [
-            tile(value: GPFormatPlaytime(stats.totalPlaytime()), label: "Total playtime"),
-            tile(value: "\(stats.totalSessions())", label: "Sessions"),
+        let pings = session.hosts.map { session.lastPingMs(for: $0) }.filter { $0 >= 0 }
+        let avgPing = pings.isEmpty ? "—" : "\(pings.reduce(0, +) / pings.count) ms"
+        let dataText = stats.totalStreamedGB >= 10
+            ? String(format: "%.0f GB", stats.totalStreamedGB)
+            : String(format: "%.1f GB", stats.totalStreamedGB)
+
+        let row1 = UIStackView(arrangedSubviews: [
+            tile(value: gpFormatPlaytime(stats.totalSeconds), title: "Total playtime"),
+            tile(value: "\(stats.sessionCount)", title: "Sessions"),
         ])
-        let tilesRow2 = UIStackView(arrangedSubviews: [
-            tile(value: dataText, label: "Streamed data"),
-            tile(value: pingText, label: "Avg. home ping"),
+        let row2 = UIStackView(arrangedSubviews: [
+            tile(value: dataText, title: "Streamed data"),
+            tile(value: avgPing, title: "Avg. home ping"),
         ])
-        for row in [tilesRow1, tilesRow2] {
+        for row in [row1, row2] {
             row.axis = .horizontal
-            row.spacing = 12
             row.distribution = .fillEqually
-            stack.addArrangedSubview(row)
+            row.spacing = 10
+            dynamicStack.addArrangedSubview(row)
         }
 
         // Most played
-        stack.addArrangedSubview(GPSectionHeader(title: "Most played"))
-        let ranked = stats.rankedPlaytime().prefix(5)
-        if ranked.isEmpty {
-            stack.addArrangedSubview(GPLabel("Nothing yet — your most-played games will appear here after your first sessions.",
-                                             font: GPTheme.body(13.5, weight: .semibold), color: GPTheme.mut, lines: 3))
-        } else {
-            for entry in ranked {
-                stack.addArrangedSubview(mostPlayedRow(appKey: entry.key, seconds: entry.seconds))
+        let mostPlayed = stats.mostPlayed()
+        if !mostPlayed.isEmpty {
+            dynamicStack.addArrangedSubview(gpSectionHeader("Most played"))
+            for entry in mostPlayed {
+                let row = GPRow(showsChevron: false)
+                row.titleLabel.text = entry.name
+                row.valueLabel.text = gpFormatPlaytime(entry.seconds)
+                dynamicStack.addArrangedSubview(row)
             }
         }
 
         // This week
-        let weekCount = stats.sessionsThisWeekCount()
-        stack.addArrangedSubview(GPSectionHeader(title: "This week", subtitle: weekCount == 1 ? "1 session" : "\(weekCount) sessions"))
-        stack.addArrangedSubview(weekChart(counts: stats.sessionsThisWeek()))
-
-        stack.addArrangedSubview(GPLabel("Counted on this phone from your GameParks sessions — playtime, sessions and streamed data are recorded as you play.",
-                                         font: GPTheme.body(12, weight: .semibold), color: GPTheme.dim, lines: 3))
+        let week = stats.thisWeek()
+        dynamicStack.addArrangedSubview(gpSectionHeader("This week", subtitle: "\(week.total) sessions"))
+        dynamicStack.addArrangedSubview(weekChart(days: week.days))
     }
 
-    private func tile(value: String, label: String) -> UIView {
-        let card = UIView()
-        card.backgroundColor = GPTheme.panel
-        card.round(16)
-        let valueLabel = GPLabel(value, font: GPTheme.display(22, weight: .extrabold), color: GPTheme.ink)
-        let labelLabel = GPLabel(label, font: GPTheme.body(12, weight: .semibold), color: GPTheme.mut)
-        let stack = UIStackView(arrangedSubviews: [valueLabel, labelLabel])
+    private func tile(value: String, title: String) -> UIView {
+        let tile = UIView()
+        tile.backgroundColor = GPColor.panel
+        tile.layer.cornerRadius = 16
+        let stack = UIStackView(arrangedSubviews: [
+            gpLabel(value, font: GPFont.display(22, weight: .extrabold), color: GPColor.textPrimary, lines: 1),
+            gpLabel(title, font: GPFont.body(12), color: GPColor.textSecondary, lines: 1),
+        ])
         stack.axis = .vertical
-        stack.spacing = 3
-        stack.isLayoutMarginsRelativeArrangement = true
-        stack.layoutMargins = UIEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        stack.spacing = 2
         stack.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(stack)
+        tile.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: card.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: tile.topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -14),
         ])
-        return card
+        return tile
     }
 
-    private func mostPlayedRow(appKey: String, seconds: TimeInterval) -> UIView {
-        // Resolve the app key (hostUUID/discriminator) back to a game
-        // name — on the key's OWN host. The old code ignored the host
-        // part and searched every host for the suffix, so two hosts
-        // sharing an app id showed the first host's game name for the
-        // other host's playtime.
-        var name = "Game"
-        if let slash = appKey.firstIndex(of: "/") {
-            let hostUUID = String(appKey[..<slash])
-            if let host = GPEngine.shared.hosts.first(where: { $0.uuid == hostUUID }),
-               let app = host.appList.compactMap({ $0 as? TemporaryApp })
-                   .first(where: { GPStats.appKey(host: host, app: $0) == appKey }) {
-                name = app.name ?? name
-            }
-        }
-        let row = UIView()
-        row.backgroundColor = GPTheme.panel
-        row.round(14)
-        let nameLabel = GPLabel(name, font: GPTheme.body(14.5, weight: .semibold), color: GPTheme.ink, lines: 2)
-        let hoursLabel = GPLabel(GPFormatPlaytime(seconds), font: GPTheme.display(14, weight: .bold), color: GPTheme.accent)
-        hoursLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let inner = UIStackView(arrangedSubviews: [nameLabel, hoursLabel])
-        inner.axis = .horizontal
-        inner.spacing = 10
-        inner.alignment = .center
-        inner.isLayoutMarginsRelativeArrangement = true
-        inner.layoutMargins = UIEdgeInsets(top: 13, left: 16, bottom: 13, right: 16)
-        inner.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(inner)
-        NSLayoutConstraint.activate([
-            inner.topAnchor.constraint(equalTo: row.topAnchor),
-            inner.bottomAnchor.constraint(equalTo: row.bottomAnchor),
-            inner.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            inner.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-        ])
-        return row
-    }
-
-    private func weekChart(counts: [Int]) -> UIView {
+    private func weekChart(days: [Int]) -> UIView {
         let card = UIView()
-        card.backgroundColor = GPTheme.panel
-        card.round(16)
-        let days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        let maxCount = max(counts.max() ?? 0, 1)
+        card.backgroundColor = GPColor.panel
+        card.layer.cornerRadius = 16
+
+        let maxCount = max(days.max() ?? 0, 1)
+        let dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         let bars = UIStackView()
         bars.axis = .horizontal
         bars.distribution = .fillEqually
         bars.alignment = .bottom
-        bars.spacing = 10
-        // Zip with the day names: indexing days[] by the counts'
-        // enumeration crashed if the counts ever came back ≠ 7.
-        for (day, count) in zip(days, counts) {
+        bars.spacing = 8
+
+        for (index, count) in days.enumerated() {
             let column = UIStackView()
             column.axis = .vertical
             column.spacing = 6
             column.alignment = .center
+
+            let barTrack = UIView()
+            barTrack.translatesAutoresizingMaskIntoConstraints = false
+            barTrack.heightAnchor.constraint(equalToConstant: 72).isActive = true
             let bar = UIView()
-            bar.backgroundColor = count > 0 ? GPTheme.accent : GPTheme.panel2
-            bar.round(4)
-            let height = count > 0 ? max(10, CGFloat(count) / CGFloat(maxCount) * 54) : 6
-            bar.widthAnchor.constraint(equalToConstant: 22).isActive = true
-            bar.heightAnchor.constraint(equalToConstant: height).isActive = true
-            column.addArrangedSubview(bar)
-            column.addArrangedSubview(GPLabel(day, font: GPTheme.body(10.5, weight: .bold), color: GPTheme.dim))
+            bar.backgroundColor = count > 0 ? GPColor.accent : GPColor.panelRaised
+            bar.layer.cornerRadius = 4
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            barTrack.addSubview(bar)
+            let fraction = CGFloat(count) / CGFloat(maxCount)
+            NSLayoutConstraint.activate([
+                bar.bottomAnchor.constraint(equalTo: barTrack.bottomAnchor),
+                bar.centerXAnchor.constraint(equalTo: barTrack.centerXAnchor),
+                bar.widthAnchor.constraint(equalToConstant: 16),
+                bar.heightAnchor.constraint(equalToConstant: max(6, 72 * fraction)),
+            ])
+            column.addArrangedSubview(barTrack)
+            column.addArrangedSubview(gpLabel(dayNames[index], font: GPFont.body(11), color: GPColor.textSecondary, lines: 1))
             bars.addArrangedSubview(column)
         }
-        bars.isLayoutMarginsRelativeArrangement = true
-        bars.layoutMargins = UIEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
+
         bars.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(bars)
         NSLayoutConstraint.activate([
-            bars.topAnchor.constraint(equalTo: card.topAnchor),
-            bars.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-            bars.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            bars.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            bars.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
+            bars.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16),
+            bars.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            bars.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
         ])
         return card
     }

@@ -2,262 +2,290 @@
 //  GPConnectingViewController.swift
 //  GameParks
 //
-//  The connecting screen from the approved design: the game's art,
-//  a live checklist (waking the host, starting the game, negotiating
-//  the stream, controller) and then straight into the stream.
+//  The design's connecting screen: a short checklist that does
+//  real work — wake the PC if needed, confirm it over server-info,
+//  build the stream exactly as upstream does, note the controller
+//  state — and then pushes upstream's own stream view controller
+//  onto the navigation stack, the way upstream's push segue does.
+//  Every failure lands on words plus a next action, never a void.
 //
 
 import UIKit
+import GameController
 
 final class GPConnectingViewController: GPBaseViewController {
+    private enum StepState {
+        case pending, active, done, warning, failed
+    }
+
+    private let hostUUID: String
+    private var host: TemporaryHost
     private let app: TemporaryApp
-    private let backgroundImage = UIImageView()
-    private let titleLabel = GPLabel("Connecting…", font: GPTheme.display(24, weight: .extrabold), color: GPTheme.ink)
-    private let subtitleLabel = GPLabel("", font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut)
-    private var stepRows: [(row: UIView, check: UILabel, label: UILabel)] = []
-    private var finished = false
-    private var started = false
 
-    init(app: TemporaryApp) {
+    private var stepRows: [(icon: UILabel, label: UILabel, spinner: UIActivityIndicatorView)] = []
+    private let footerStack = UIStackView()
+    private var cancelled = false
+    private var launched = false
+    private var wakeAttempts = 0
+
+    init(host: TemporaryHost, app: TemporaryApp) {
+        self.host = host
         self.app = app
+        self.hostUUID = host.uuid ?? ""
         super.init(nibName: nil, bundle: nil)
-        hidesBottomBarWhenPushed = true
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        contentStack.addArrangedSubview(makeHeader(
+            title: "Connecting…",
+            subtitle: "\(app.name ?? "Game") · \(host.name ?? "your PC")",
+            showsBack: true))
 
-        backgroundImage.image = GPCoverArt.cover(for: app)
-        backgroundImage.contentMode = .scaleAspectFill
-        backgroundImage.clipsToBounds = true
-        backgroundImage.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(backgroundImage)
-
-        let dim = UIView()
-        dim.backgroundColor = UIColor(hex: 0x05060A, alpha: 0.82)
-        dim.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(dim)
-
-        // Join only the parts that exist — a missing name used to
-        // leave a stray " · " in the subtitle.
-        subtitleLabel.text = [app.name, app.host?.name]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-            .joined(separator: " · ")
-
-        let stepsStack = UIStackView()
-        stepsStack.axis = .vertical
-        stepsStack.spacing = 14
-        stepsStack.translatesAutoresizingMaskIntoConstraints = false
-
-        let hostName = app.host?.name ?? "your PC"
-        let settings = GPEngine.shared.currentSettings()
-        let resLabel = "\(settings?.height?.intValue ?? 1080)p\(settings?.framerate?.intValue ?? 60)"
-        let stepTexts = [
-            "Waking \(hostName)",
-            "Starting the game",
-            "Negotiating stream · \(resLabel)",
-            GPEngine.shared.bluetoothControllerConnected ? "Controller connected" : "On-screen controls ready",
+        let settings = DataManager().getSettings()
+        let streamSummary = settings != nil
+            ? "\(settings!.height?.intValue ?? 1080)p\(settings!.framerate?.intValue ?? 60)"
+            : "1080p60"
+        let stepTitles = [
+            "Waking \(host.name ?? "your PC")",
+            GPSessionController.shared.runningApp(for: host)?.id == app.id ? "Resuming the game" : "Starting the game",
+            "Negotiating stream · \(streamSummary)",
+            "Controller connected",
         ]
-        for text in stepTexts {
-            let check = GPLabel("○", font: GPTheme.body(16, weight: .bold), color: GPTheme.dim)
-            let label = GPLabel(text, font: GPTheme.body(15, weight: .semibold), color: GPTheme.mut)
-            let row = UIStackView(arrangedSubviews: [check, label])
-            row.axis = .horizontal
-            row.spacing = 10
-            row.alignment = .center
-            stepsStack.addArrangedSubview(row)
-            stepRows.append((row: row, check: check, label: label))
+        for title in stepTitles {
+            contentStack.addArrangedSubview(makeStepRow(title: title))
         }
 
-        let cancelButton = UIButton(type: .system)
-        cancelButton.setTitle("Cancel", for: .normal)
-        cancelButton.setTitleColor(GPTheme.mut, for: .normal)
-        cancelButton.titleLabel?.font = GPTheme.body(15, weight: .bold)
-        cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
-        cancelButton.translatesAutoresizingMaskIntoConstraints = false
-
-        let contentStack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel, stepsStack, cancelButton])
-        contentStack.axis = .vertical
-        contentStack.spacing = 16
-        contentStack.alignment = .leading
-        contentStack.setCustomSpacing(28, after: subtitleLabel)
-        contentStack.setCustomSpacing(34, after: stepsStack)
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(contentStack)
-
-        NSLayoutConstraint.activate([
-            backgroundImage.topAnchor.constraint(equalTo: view.topAnchor),
-            backgroundImage.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            backgroundImage.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            backgroundImage.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            dim.topAnchor.constraint(equalTo: view.topAnchor),
-            dim.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            dim.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            dim.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            contentStack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 28),
-            contentStack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -28),
-            contentStack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-        ])
+        footerStack.axis = .vertical
+        footerStack.spacing = 12
+        contentStack.addArrangedSubview(footerStack)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Run once: re-appearing (an alert dismissed, the screen
-        // re-shown) used to restart the whole sequence — duplicate
-        // wake polls, duplicate running-app alerts, duplicate streams.
-        guard !started else { return }
-        started = true
-        runConnectionSequence()
+        if !launched {
+            runSequence()
+        }
     }
 
-    private func markStep(_ index: Int) {
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if !launched {
+            cancelled = true
+        }
+    }
+
+    // MARK: - Checklist UI
+
+    private func makeStepRow(title: String) -> UIView {
+        let card = UIView()
+        card.backgroundColor = GPColor.panel
+        card.layer.cornerRadius = 16
+
+        let icon = gpLabel("○", font: GPFont.display(16, weight: .bold), color: GPColor.textFaint, lines: 1)
+        icon.textAlignment = .center
+        let spinner = UIActivityIndicatorView(style: .medium)
+        spinner.color = GPColor.accent
+        spinner.isHidden = true
+        let label = gpLabel(title, font: GPFont.body(15, weight: .semibold), color: GPColor.textSecondary, lines: 0)
+
+        let iconBox = UIView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        iconBox.addSubview(icon)
+        iconBox.addSubview(spinner)
+
+        let row = UIStackView(arrangedSubviews: [iconBox, label])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 12
+        row.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(row)
+
+        NSLayoutConstraint.activate([
+            iconBox.widthAnchor.constraint(equalToConstant: 24),
+            iconBox.heightAnchor.constraint(equalToConstant: 24),
+            icon.centerXAnchor.constraint(equalTo: iconBox.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor),
+            spinner.centerXAnchor.constraint(equalTo: iconBox.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor),
+            row.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+        ])
+        stepRows.append((icon: icon, label: label, spinner: spinner))
+        return card
+    }
+
+    private func setStep(_ index: Int, state: StepState, text: String? = nil) {
         guard stepRows.indices.contains(index) else { return }
-        stepRows[index].check.text = "✓"
-        stepRows[index].check.textColor = GPTheme.live
-        stepRows[index].label.textColor = GPTheme.ink
+        let row = stepRows[index]
+        if let text = text {
+            row.label.text = text
+        }
+        switch state {
+        case .pending:
+            row.icon.text = "○"
+            row.icon.textColor = GPColor.textFaint
+            row.spinner.stopAnimating()
+            row.spinner.isHidden = true
+            row.icon.isHidden = false
+            row.label.textColor = GPColor.textSecondary
+        case .active:
+            row.spinner.startAnimating()
+            row.spinner.isHidden = false
+            row.icon.isHidden = true
+            row.label.textColor = GPColor.textPrimary
+        case .done:
+            row.icon.text = "✓"
+            row.icon.textColor = GPColor.accent
+            row.spinner.stopAnimating()
+            row.spinner.isHidden = true
+            row.icon.isHidden = false
+            row.label.textColor = GPColor.textPrimary
+        case .warning:
+            row.icon.text = "!"
+            row.icon.textColor = GPColor.warning
+            row.spinner.stopAnimating()
+            row.spinner.isHidden = true
+            row.icon.isHidden = false
+            row.label.textColor = GPColor.textPrimary
+        case .failed:
+            row.icon.text = "✕"
+            row.icon.textColor = GPColor.danger
+            row.spinner.stopAnimating()
+            row.spinner.isHidden = true
+            row.icon.isHidden = false
+            row.label.textColor = GPColor.textPrimary
+        }
     }
 
-    private func runConnectionSequence() {
-        guard let host = app.host else {
-            fail(message: "This game's PC is no longer available.")
-            return
-        }
-        let engine = GPEngine.shared
-
-        // Step 1: the host must be awake and online. An .unknown host
-        // (never successfully polled) takes the same path — it used
-        // to be passed as "awake" and failed later, inside the stream.
-        if host.state == .offline || host.state == .unknown {
-            engine.wake(host)
-            waitForHostOnline(host, attempts: 12) { [weak self] online in
-                guard let self = self else { return }
-                if online {
-                    self.markStep(0)
-                    self.startGameSteps()
-                } else {
-                    self.fail(message: "\(host.name) did not wake up. Check that it is plugged in and Wake-on-LAN is on, then try again.")
-                }
-            }
-        } else {
-            markStep(0)
-            startGameSteps()
-        }
+    private func showFailure(message: String) {
+        footerStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let note = GPMessageView()
+        note.configure(title: "Couldn't connect", message: message, actionTitle: "Try again")
+        note.actionButton.addTarget(self, action: #selector(retryTapped), for: .touchUpInside)
+        footerStack.addArrangedSubview(note)
+        let backButton = gpSecondaryButton("Back")
+        backButton.addTarget(self, action: #selector(gpGoBack), for: .touchUpInside)
+        footerStack.addArrangedSubview(backButton)
     }
 
-    private func waitForHostOnline(_ host: TemporaryHost, attempts: Int, completion: @escaping (Bool) -> Void) {
-        if finished {
-            return
+    @objc private func retryTapped() {
+        footerStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for index in stepRows.indices {
+            setStep(index, state: .pending)
         }
+        cancelled = false
+        wakeAttempts = 0
+        runSequence()
+    }
+
+    // MARK: - The sequence
+
+    private func runSequence() {
+        cancelled = false
+        stepWake()
+    }
+
+    private func stepWake() {
+        guard !cancelled else { return }
+        refreshHost()
         if host.state == .online {
-            completion(true)
+            setStep(0, state: .done)
+            stepStart()
             return
         }
-        if attempts <= 0 {
-            completion(false)
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.waitForHostOnline(host, attempts: attempts - 1, completion: completion)
-        }
+        setStep(0, state: .active)
+        GPSessionController.shared.wakeHost(host)
+        pollForWake()
     }
 
-    private func startGameSteps() {
-        guard !finished else { return }
-        guard let host = app.host else {
-            fail(message: "This game's PC is no longer available.")
+    private func pollForWake() {
+        guard !cancelled else { return }
+        wakeAttempts += 1
+        if wakeAttempts > 15 {
+            setStep(0, state: .failed)
+            showFailure(message: "\(host.name ?? "Your PC") didn't answer. Check that it's on, Sunshine is running, and Wake-on-LAN is enabled on the PC.")
             return
         }
-        guard let nav = navigationController else {
-            fail(message: "The stream could not be started. Go back and try again.")
-            return
-        }
-        let engine = GPEngine.shared
-
-        // Another game already running on the host? Ask before quitting
-        // it. The check uses the FULL app list (hidden games included):
-        // a hidden running game blocks a launch just the same.
-        if let running = engine.anyRunningApp(for: host), running.id != app.id {
-            let alert = UIAlertController(title: "Another game is running",
-                                          message: "\(running.name ?? "Another game") is currently running on \(host.name).",
-                                          preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
-                self?.navigationController?.popViewController(animated: true)
-            })
-            alert.addAction(UIAlertAction(title: "Quit and start \(app.name ?? "this game")", style: .destructive) { [weak self] _ in
-                engine.quitCurrentApp(on: host) { [weak self] quitOk in
-                    guard let self = self else { return }
-                    if quitOk {
-                        self.startGameSteps()
-                    } else {
-                        // A failed quit used to be treated as success
-                        // and the launch ran into a busy host.
-                        self.fail(message: "\(running.name ?? "The running game") could not be quit. Quit it on the PC, then try again.")
-                    }
-                }
-            })
-            present(alert, animated: true)
-            return
-        }
-
-        markStep(1)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            guard let self = self, !self.finished else { return }
-            // Re-check at the last moment: a host that went offline or
-            // unpaired during the steps above must not get a stream
-            // built on a stale address — and after this screen has
-            // replaced itself, fail() could never have reported it.
-            guard host.state == .online, host.pairState == .paired else {
-                self.fail(message: "The connection to \(host.name) was lost. Make sure the PC is online and paired, then try again.")
-                return
-            }
-            guard let streamVC = engine.makeStreamViewController(for: self.app) else {
-                self.fail(message: "The stream could not be created. Make sure the PC is paired and online.")
-                return
-            }
-            // Steps 2 and 3 complete only now — when the stream screen
-            // actually exists — not on a fixed timer.
-            self.markStep(2)
-            self.markStep(3)
-            self.finished = true
-            engine.registerStreamStart(app: self.app, viewController: streamVC)
-            var stack = nav.viewControllers
-            if let index = stack.firstIndex(of: self) {
-                stack[index] = streamVC
+        // One silent server-info round trip per poll — the same
+        // activation the host page uses, minus pairing.
+        GPSessionController.shared.activateHost(host, userInitiated: false, skipFastPath: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self, !self.cancelled else { return }
+            self.refreshHost()
+            if self.host.state == .online {
+                self.setStep(0, state: .done)
+                self.stepStart()
             } else {
-                // Never leave this (finished, dead) screen underneath
-                // the stream in the stack.
-                stack.removeAll { $0 === self }
-                stack.append(streamVC)
+                self.pollForWake()
             }
-            nav.setViewControllers(stack, animated: true)
         }
     }
 
-    private func fail(message: String) {
-        // Mark finished FIRST so pending polls/blocks cannot call
-        // fail() (or worse, startGameSteps) again afterwards.
-        finished = true
-        titleLabel.text = "Could not connect"
-        let alert = UIAlertController(title: "Could not connect", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
-            self?.navigationController?.popViewController(animated: true)
-        })
-        if view.window != nil, presentedViewController == nil {
-            present(alert, animated: true)
+    private func stepStart() {
+        guard !cancelled else { return }
+        setStep(1, state: .active)
+        // One fresh server-info round trip so the running-game
+        // state is current before we launch (upstream fetches it
+        // in its host-tap flow for the same reason).
+        GPSessionController.shared.activateHost(host, userInitiated: false, skipFastPath: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            guard let self = self, !self.cancelled else { return }
+            self.refreshHost()
+            if self.host.state != .online {
+                self.setStep(1, state: .failed)
+                self.showFailure(message: "Lost contact with \(self.host.name ?? "your PC") while starting. Check the PC and your Wi-Fi, then try again.")
+                return
+            }
+            self.setStep(1, state: .done)
+            self.stepNegotiate()
+        }
+    }
+
+    private func stepNegotiate() {
+        guard !cancelled else { return }
+        setStep(2, state: .active)
+        let session = GPSessionController.shared
+        guard let streamVC = session.streamViewController(for: app) else {
+            setStep(2, state: .failed)
+            showFailure(message: "The stream couldn't be set up for \(app.name ?? "this game"). Try again, or restart Sunshine on the PC.")
+            return
+        }
+        setStep(2, state: .done)
+        stepController(streamVC: streamVC)
+    }
+
+    private func stepController(streamVC: UIViewController) {
+        guard !cancelled else { return }
+        if GCController.controllers().isEmpty {
+            setStep(3, state: .warning, text: "No controller — touch controls will be used")
         } else {
-            // Nothing can present from here (already covered, or off-
-            // screen): leave directly instead of stranding the user.
-            navigationController?.popViewController(animated: true)
+            setStep(3, state: .done)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self = self, !self.cancelled else { return }
+            self.launch(streamVC: streamVC)
         }
     }
 
-    @objc private func cancelTapped() {
-        finished = true
-        navigationController?.popViewController(animated: true)
+    private func launch(streamVC: UIViewController) {
+        launched = true
+        let settings = DataManager().getSettings()
+        GPStats.shared.beginSession(appKey: GPCatalog.appKey(host: host, app: app),
+                                    appName: app.name ?? "Game",
+                                    bitrateKbps: settings?.bitrate?.intValue ?? 20000)
+        GPSessionController.shared.noteStreamStarted()
+        navigationController?.pushViewController(streamVC, animated: true)
+    }
+
+    private func refreshHost() {
+        if let current = GPSessionController.shared.hosts.first(where: { $0.uuid == hostUUID }) {
+            host = current
+        }
     }
 }

@@ -2,142 +2,476 @@
 //  GPComponents.swift
 //  GameParks
 //
-//  Shared building blocks in the approved design's language:
-//  poster cells, section headers, filter chips, list rows, play button.
+//  Shared building blocks for the GameParks screens. Deliberately
+//  plain UIKit: every tappable element is a UIControl or UIButton
+//  (their touch handling is the most reliable iOS offers), every
+//  screen scrolls a single vertical stack, and every pushed screen
+//  carries its own visible back control in its header.
 //
 
 import UIKit
 
-// MARK: - Poster cell
+// MARK: - Base view controller
 
-final class GPPosterCell: UICollectionViewCell {
-    static let reuseID = "GPPosterCell"
+class GPBaseViewController: UIViewController {
+    let scrollView = UIScrollView()
+    let contentStack = UIStackView()
 
-    let imageView = UIImageView()
-    let titleLabel = GPLabel("", font: GPTheme.body(13, weight: .bold), color: GPTheme.ink, lines: 2)
-    let subtitleLabel = GPLabel("", font: GPTheme.body(11, weight: .semibold), color: GPTheme.mut)
-    let badgeLabel = GPLabel("", font: GPTheme.body(10, weight: .extrabold), color: GPTheme.accentInk)
-    private let badgeView = UIView()
-    private let placeholderLabel = GPLabel("", font: GPTheme.display(28, weight: .extrabold), color: GPTheme.dim)
-    private let miniPlay = UILabel()
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .portrait }
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        contentView.backgroundColor = .clear
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = GPColor.background
+        installScaffold()
+    }
 
-        imageView.contentMode = .scaleAspectFill
-        imageView.clipsToBounds = true
-        imageView.round(14)
-        imageView.backgroundColor = GPTheme.panel2
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(imageView)
+    /// Pins the scroll view to the safe area and the stack inside it
+    /// with the design's 20pt side padding.
+    func installScaffold() {
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        // Upstream sets the same on its scroll views: touches must
+        // reach controls without the scroll view sitting on them.
+        scrollView.delaysContentTouches = false
+        scrollView.showsVerticalScrollIndicator = false
+        view.addSubview(scrollView)
 
-        placeholderLabel.textAlignment = .center
-        contentView.addSubview(placeholderLabel)
+        contentStack.axis = .vertical
+        contentStack.spacing = 16
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(contentStack)
 
-        miniPlay.text = "▶"
-        miniPlay.font = GPTheme.body(9, weight: .extrabold)
-        miniPlay.textColor = GPTheme.accentInk
-        miniPlay.textAlignment = .center
-        miniPlay.backgroundColor = GPTheme.accent
-        miniPlay.round(11)
-        miniPlay.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(miniPlay)
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-        badgeView.backgroundColor = GPTheme.accent
-        badgeView.round(6)
-        badgeView.translatesAutoresizingMaskIntoConstraints = false
-        badgeView.addSubview(badgeLabel)
-        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(badgeView)
+            contentStack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 16),
+            contentStack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -24),
+            contentStack.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor, constant: 20),
+            contentStack.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor, constant: -20),
+        ])
+    }
+
+    /// The design's screen header: big title, optional subtitle, and
+    /// — on pushed screens — a visible Back button in the layout
+    /// itself (the navigation bar is hidden in this app).
+    func makeHeader(title: String, subtitle: String? = nil, showsBack: Bool = false) -> UIView {
+        let container = UIStackView()
+        container.axis = .vertical
+        container.spacing = 4
+
+        if showsBack {
+            let back = UIButton(type: .system)
+            back.setTitle("‹  Back", for: .normal)
+            back.setTitleColor(GPColor.accent, for: .normal)
+            back.titleLabel?.font = GPFont.body(16, weight: .semibold)
+            back.contentHorizontalAlignment = .left
+            back.addTarget(self, action: #selector(gpGoBack), for: .touchUpInside)
+            var backConstraints: [NSLayoutConstraint] = []
+            back.translatesAutoresizingMaskIntoConstraints = false
+            backConstraints.append(back.heightAnchor.constraint(greaterThanOrEqualToConstant: 36))
+            container.addArrangedSubview(back)
+            NSLayoutConstraint.activate(backConstraints)
+        }
+
+        container.addArrangedSubview(gpLabel(title, font: GPFont.display(28, weight: .extrabold), color: GPColor.textPrimary, lines: 2))
+        if let subtitle = subtitle {
+            container.addArrangedSubview(gpLabel(subtitle, font: GPFont.body(14), color: GPColor.textSecondary, lines: 2))
+        }
+        return container
+    }
+
+    @objc func gpGoBack() {
+        if let navigation = navigationController, navigation.viewControllers.count > 1 {
+            navigation.popViewController(animated: true)
+        } else {
+            dismiss(animated: true)
+        }
+    }
+
+    func presentAlert(title: String, message: String, buttonTitle: String = "OK") {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: buttonTitle, style: .default))
+        present(alert, animated: true)
+    }
+
+    /// Manual host add, upstream's addHostClicked pattern with
+    /// GameParks wording: an address field, then the engine's own
+    /// discoverHost does the validation.
+    func presentAddByAddress() {
+        let alert = UIAlertController(
+            title: "Add your PC by address",
+            message: "If GameParks doesn't find your PC automatically, enter its IP address here.",
+            preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "192.168.1.100"
+            field.keyboardType = .decimalPad
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Add", style: .default) { [weak self, weak alert] _ in
+            guard let self = self else { return }
+            let address = (alert?.textFields?.first?.text ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !address.isEmpty else {
+                self.presentAlert(title: "Invalid address", message: "Enter the PC's IP address, for example 192.168.1.100.")
+                return
+            }
+            GPSessionController.shared.addHost(atAddress: address) { success, error in
+                if !success {
+                    self.presentAlert(title: "PC not found",
+                                      message: error ?? "No GameStream PC answered at that address. Check the address and that Sunshine is running.")
+                }
+            }
+        })
+        present(alert, animated: true)
+    }
+}
+
+// MARK: - Buttons
+
+func gpPrimaryButton(_ title: String) -> UIButton {
+    let button = UIButton(type: .system)
+    button.setTitle(title, for: .normal)
+    button.setTitleColor(GPColor.onAccent, for: .normal)
+    button.titleLabel?.font = GPFont.display(16, weight: .bold)
+    button.backgroundColor = GPColor.accent
+    button.layer.cornerRadius = 14
+    button.translatesAutoresizingMaskIntoConstraints = false
+    button.heightAnchor.constraint(equalToConstant: 52).isActive = true
+    return button
+}
+
+func gpSecondaryButton(_ title: String) -> UIButton {
+    let button = UIButton(type: .system)
+    button.setTitle(title, for: .normal)
+    button.setTitleColor(GPColor.textPrimary, for: .normal)
+    button.titleLabel?.font = GPFont.body(15, weight: .semibold)
+    button.backgroundColor = GPColor.panelRaised
+    button.layer.cornerRadius = 14
+    button.translatesAutoresizingMaskIntoConstraints = false
+    button.heightAnchor.constraint(equalToConstant: 48).isActive = true
+    return button
+}
+
+// MARK: - Card button
+
+/// A tappable panel card. Content goes into `stack`.
+final class GPCardButton: UIControl {
+    let stack = UIStackView()
+
+    init() {
+        super.init(frame: .zero)
+        backgroundColor = GPColor.panel
+        layer.cornerRadius = 20
+        stack.axis = .vertical
+        stack.spacing = 6
+        stack.isUserInteractionEnabled = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isHighlighted: Bool {
+        didSet { alpha = isHighlighted ? 0.75 : 1.0 }
+    }
+}
+
+// MARK: - Rows
+
+/// A tappable settings/list row: title, subtitle, optional value and
+/// chevron.
+final class GPRow: UIControl {
+    let titleLabel = gpLabel(nil, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+    let subtitleLabel = gpLabel(nil, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
+    let valueLabel = gpLabel(nil, font: GPFont.body(14, weight: .semibold), color: GPColor.textSecondary, lines: 1)
+    private let chevronLabel = gpLabel("›", font: GPFont.display(20, weight: .bold), color: GPColor.textFaint, lines: 1)
+
+    init(showsChevron: Bool = true) {
+        super.init(frame: .zero)
+        backgroundColor = GPColor.panel
+        layer.cornerRadius = 16
 
         let textStack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
         textStack.axis = .vertical
         textStack.spacing = 2
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(textStack)
+        textStack.isUserInteractionEnabled = false
 
+        let row = UIStackView(arrangedSubviews: [textStack, valueLabel])
+        if showsChevron {
+            row.addArrangedSubview(chevronLabel)
+        }
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 10
+        row.isUserInteractionEnabled = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
         NSLayoutConstraint.activate([
-            imageView.topAnchor.constraint(equalTo: contentView.topAnchor),
-            imageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            imageView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            imageView.heightAnchor.constraint(equalTo: imageView.widthAnchor, multiplier: 1.42),
-
-            placeholderLabel.centerXAnchor.constraint(equalTo: imageView.centerXAnchor),
-            placeholderLabel.centerYAnchor.constraint(equalTo: imageView.centerYAnchor),
-
-            miniPlay.widthAnchor.constraint(equalToConstant: 22),
-            miniPlay.heightAnchor.constraint(equalToConstant: 22),
-            miniPlay.trailingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: -7),
-            miniPlay.bottomAnchor.constraint(equalTo: imageView.bottomAnchor, constant: -7),
-
-            badgeView.topAnchor.constraint(equalTo: imageView.topAnchor, constant: 6),
-            badgeView.leadingAnchor.constraint(equalTo: imageView.leadingAnchor, constant: 6),
-            badgeLabel.topAnchor.constraint(equalTo: badgeView.topAnchor, constant: 2),
-            badgeLabel.bottomAnchor.constraint(equalTo: badgeView.bottomAnchor, constant: -2),
-            badgeLabel.leadingAnchor.constraint(equalTo: badgeView.leadingAnchor, constant: 6),
-            badgeLabel.trailingAnchor.constraint(equalTo: badgeView.trailingAnchor, constant: -6),
-
-            textStack.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 7),
-            textStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            textStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            textStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 56),
         ])
+        subtitleLabel.isHidden = true
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    var subtitle: String? {
+        didSet {
+            subtitleLabel.text = subtitle
+            subtitleLabel.isHidden = (subtitle == nil || subtitle!.isEmpty)
+        }
     }
 
-    func configure(app: TemporaryApp, subtitle: String, badge: String?) {
-        titleLabel.text = app.name
-        subtitleLabel.text = subtitle
-        if let image = GPCoverArt.cover(for: app) {
-            imageView.image = image
-            placeholderLabel.text = nil
-        } else {
-            imageView.image = nil
-            placeholderLabel.text = String((app.name ?? "?").prefix(1)).uppercased()
+    override var isHighlighted: Bool {
+        didSet { alpha = isHighlighted ? 0.75 : 1.0 }
+    }
+}
+
+/// A row with a switch. The whole row is the control; the switch is
+/// display-only, so a tap anywhere flips it.
+final class GPSwitchRow: UIControl {
+    let titleLabel = gpLabel(nil, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+    let subtitleLabel = gpLabel(nil, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
+    let toggle = UISwitch()
+    var onToggle: ((Bool) -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        backgroundColor = GPColor.panel
+        layer.cornerRadius = 16
+
+        toggle.onTintColor = GPColor.accent
+        toggle.isUserInteractionEnabled = false
+
+        let textStack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
+        textStack.axis = .vertical
+        textStack.spacing = 2
+        textStack.isUserInteractionEnabled = false
+
+        let row = UIStackView(arrangedSubviews: [textStack, toggle])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 10
+        row.isUserInteractionEnabled = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 56),
+        ])
+        subtitleLabel.isHidden = true
+        addTarget(self, action: #selector(rowTapped), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    var subtitle: String? {
+        didSet {
+            subtitleLabel.text = subtitle
+            subtitleLabel.isHidden = (subtitle == nil || subtitle!.isEmpty)
         }
-        if let badge = badge, !badge.isEmpty {
-            badgeView.isHidden = false
-            badgeLabel.text = badge
-        } else {
-            badgeView.isHidden = true
-        }
+    }
+
+    var isOn: Bool {
+        get { toggle.isOn }
+        set { toggle.isOn = newValue }
+    }
+
+    @objc private func rowTapped() {
+        toggle.isOn.toggle()
+        onToggle?(toggle.isOn)
+    }
+
+    override var isHighlighted: Bool {
+        didSet { alpha = isHighlighted ? 0.85 : 1.0 }
     }
 }
 
 // MARK: - Section header
 
-final class GPSectionHeader: UIView {
-    init(title: String, subtitle: String? = nil) {
+func gpSectionHeader(_ title: String, subtitle: String? = nil) -> UIView {
+    let stack = UIStackView()
+    stack.axis = .vertical
+    stack.spacing = 2
+    stack.addArrangedSubview(gpLabel(title, font: GPFont.display(19, weight: .bold), color: GPColor.textPrimary, lines: 1))
+    if let subtitle = subtitle {
+        stack.addArrangedSubview(gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
+    }
+    return stack
+}
+
+// MARK: - Poster
+
+/// A game poster: bundled cover art when we have it, otherwise a
+/// title tile in the design's panel tone. Fixed 2:3-ish art area.
+final class GPPosterView: UIControl {
+    private let artContainer = UIView()
+    private let imageView = UIImageView()
+    private let tileLabel = gpLabel(nil, font: GPFont.display(15, weight: .bold), color: GPColor.textPrimary, lines: 3)
+    let nameLabel = gpLabel(nil, font: GPFont.body(13, weight: .semibold), color: GPColor.textPrimary, lines: 2)
+    let subtitleLabel = gpLabel(nil, font: GPFont.body(11), color: GPColor.textSecondary, lines: 1)
+
+    init() {
         super.init(frame: .zero)
-        let titleLabel = GPLabel(title, font: GPTheme.display(19, weight: .bold), color: GPTheme.ink)
-        let stack = UIStackView(arrangedSubviews: [titleLabel])
+        artContainer.backgroundColor = GPColor.panelRaised
+        artContainer.layer.cornerRadius = 14
+        artContainer.clipsToBounds = true
+        artContainer.isUserInteractionEnabled = false
+
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        artContainer.addSubview(imageView)
+
+        tileLabel.textAlignment = .center
+        tileLabel.translatesAutoresizingMaskIntoConstraints = false
+        artContainer.addSubview(tileLabel)
+
+        let stack = UIStackView(arrangedSubviews: [artContainer, nameLabel, subtitleLabel])
         stack.axis = .vertical
-        stack.spacing = 2
-        if let subtitle = subtitle {
-            stack.addArrangedSubview(GPLabel(subtitle, font: GPTheme.body(12, weight: .semibold), color: GPTheme.dim))
-        }
+        stack.spacing = 5
+        stack.isUserInteractionEnabled = false
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            artContainer.heightAnchor.constraint(equalTo: artContainer.widthAnchor, multiplier: 1.42),
+            imageView.topAnchor.constraint(equalTo: artContainer.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: artContainer.bottomAnchor),
+            imageView.leadingAnchor.constraint(equalTo: artContainer.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: artContainer.trailingAnchor),
+            tileLabel.centerYAnchor.constraint(equalTo: artContainer.centerYAnchor),
+            tileLabel.leadingAnchor.constraint(equalTo: artContainer.leadingAnchor, constant: 10),
+            tileLabel.trailingAnchor.constraint(equalTo: artContainer.trailingAnchor, constant: -10),
         ])
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(name: String, subtitle: String?, cover: UIImage?) {
+        nameLabel.text = name
+        subtitleLabel.text = subtitle
+        subtitleLabel.isHidden = (subtitle == nil)
+        if let cover = cover {
+            imageView.image = cover
+            imageView.isHidden = false
+            tileLabel.isHidden = true
+        } else {
+            imageView.image = nil
+            imageView.isHidden = true
+            tileLabel.text = name
+            tileLabel.isHidden = false
+        }
+    }
+
+    override var isHighlighted: Bool {
+        didSet { alpha = isHighlighted ? 0.75 : 1.0 }
     }
 }
 
-// MARK: - Filter chip
+/// A horizontal app row for lists: small art, name, source line,
+/// chevron.
+final class GPAppRow: UIControl {
+    private let imageView = UIImageView()
+    private let tileView = UIView()
+    private let tileLabel = gpLabel(nil, font: GPFont.display(11, weight: .bold), color: GPColor.textPrimary, lines: 2)
+    let nameLabel = gpLabel(nil, font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+    let subtitleLabel = gpLabel(nil, font: GPFont.body(12), color: GPColor.textSecondary, lines: 1)
 
-final class GPChip: UIButton {
+    init() {
+        super.init(frame: .zero)
+        backgroundColor = GPColor.panel
+        layer.cornerRadius = 16
+
+        let art = UIView()
+        art.layer.cornerRadius = 10
+        art.clipsToBounds = true
+        art.backgroundColor = GPColor.panelRaised
+        art.translatesAutoresizingMaskIntoConstraints = false
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        art.addSubview(imageView)
+        tileLabel.textAlignment = .center
+        tileLabel.translatesAutoresizingMaskIntoConstraints = false
+        art.addSubview(tileLabel)
+
+        let textStack = UIStackView(arrangedSubviews: [nameLabel, subtitleLabel])
+        textStack.axis = .vertical
+        textStack.spacing = 2
+
+        let chevron = gpLabel("›", font: GPFont.display(20, weight: .bold), color: GPColor.textFaint, lines: 1)
+
+        let row = UIStackView(arrangedSubviews: [art, textStack, chevron])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 12
+        row.isUserInteractionEnabled = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            art.widthAnchor.constraint(equalToConstant: 46),
+            art.heightAnchor.constraint(equalToConstant: 62),
+            imageView.topAnchor.constraint(equalTo: art.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: art.bottomAnchor),
+            imageView.leadingAnchor.constraint(equalTo: art.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: art.trailingAnchor),
+            tileLabel.centerYAnchor.constraint(equalTo: art.centerYAnchor),
+            tileLabel.leadingAnchor.constraint(equalTo: art.leadingAnchor, constant: 3),
+            tileLabel.trailingAnchor.constraint(equalTo: art.trailingAnchor, constant: -3),
+        ])
+        tileView.isHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(name: String, subtitle: String?, cover: UIImage?) {
+        nameLabel.text = name
+        subtitleLabel.text = subtitle
+        if let cover = cover {
+            imageView.image = cover
+            imageView.isHidden = false
+            tileLabel.isHidden = true
+        } else {
+            imageView.image = nil
+            imageView.isHidden = true
+            tileLabel.text = name
+            tileLabel.isHidden = false
+        }
+    }
+
+    override var isHighlighted: Bool {
+        didSet { alpha = isHighlighted ? 0.75 : 1.0 }
+    }
+}
+
+// MARK: - Chips
+
+final class GPChipButton: UIButton {
     var chipSelected: Bool = false {
         didSet { refreshStyle() }
     }
@@ -145,189 +479,61 @@ final class GPChip: UIButton {
     init(title: String) {
         super.init(frame: .zero)
         setTitle(title, for: .normal)
-        titleLabel?.font = GPTheme.body(13, weight: .bold)
-        contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
-        round(99)
+        titleLabel?.font = GPFont.body(13, weight: .semibold)
+        layer.cornerRadius = 16
+        contentEdgeInsets = UIEdgeInsets(top: 7, left: 14, bottom: 7, right: 14)
         refreshStyle()
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func refreshStyle() {
         if chipSelected {
-            backgroundColor = GPTheme.accent
-            setTitleColor(GPTheme.accentInk, for: .normal)
-            layer.borderWidth = 0
+            backgroundColor = GPColor.accent
+            setTitleColor(GPColor.onAccent, for: .normal)
         } else {
-            backgroundColor = GPTheme.panel
-            setTitleColor(GPTheme.mut, for: .normal)
-            layer.borderWidth = 1
-            layer.borderColor = GPTheme.line.cgColor
+            backgroundColor = GPColor.panelRaised
+            setTitleColor(GPColor.textPrimary, for: .normal)
         }
     }
 }
 
-// MARK: - List row (settings / host actions)
+// MARK: - Empty / message state
 
-/// A settings/list row. Not final: screens subclass it to carry a
-/// model object with the row (e.g. Home's game rows carry their app).
-class GPRow: UIControl {
-    let titleLabel = GPLabel("", font: GPTheme.body(15, weight: .semibold), color: GPTheme.ink, lines: 2)
-    let subtitleLabel = GPLabel("", font: GPTheme.body(12, weight: .semibold), color: GPTheme.mut, lines: 2)
-    let valueLabel = GPLabel("", font: GPTheme.body(13, weight: .bold), color: GPTheme.accent)
-    let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
-    let toggle = UISwitch()
+/// A panel that explains a state and offers the way forward — the
+/// app never shows a silent blank screen.
+final class GPMessageView: UIView {
+    let titleLabel = gpLabel(nil, font: GPFont.display(17, weight: .bold), color: GPColor.textPrimary, lines: 0)
+    let messageLabel = gpLabel(nil, font: GPFont.body(14), color: GPColor.textSecondary, lines: 0)
+    let actionButton = gpSecondaryButton("Retry")
 
-    var showsToggle: Bool = false {
-        didSet {
-            toggle.isHidden = !showsToggle
-            refreshChevronVisibility()
-            valueLabel.isHidden = showsToggle
-        }
-    }
-
-    /// Non-interactive status rows (e.g. Bluetooth controller state)
-    /// set this false: a chevron promises navigation that isn't there.
-    var showsChevron: Bool = true {
-        didSet { refreshChevronVisibility() }
-    }
-
-    private func refreshChevronVisibility() {
-        chevron.isHidden = showsToggle || !showsChevron
-    }
-
-    init(title: String, subtitle: String? = nil, value: String? = nil) {
+    init() {
         super.init(frame: .zero)
-        backgroundColor = GPTheme.panel
-        round(14)
-
-        titleLabel.text = title
-        subtitleLabel.text = subtitle
-        subtitleLabel.isHidden = subtitle == nil
-        valueLabel.text = value
-        chevron.tintColor = GPTheme.dim
-        chevron.contentMode = .scaleAspectFit
-        toggle.onTintColor = GPTheme.accent
-        toggle.isHidden = true
-
-        let textStack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
-        textStack.axis = .vertical
-        textStack.spacing = 2
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(textStack)
-
-        let trailingStack = UIStackView(arrangedSubviews: [valueLabel, chevron, toggle])
-        trailingStack.axis = .horizontal
-        trailingStack.spacing = 8
-        trailingStack.alignment = .center
-        trailingStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(trailingStack)
-
+        backgroundColor = GPColor.panel
+        layer.cornerRadius = 20
+        let stack = UIStackView(arrangedSubviews: [titleLabel, messageLabel, actionButton])
+        stack.axis = .vertical
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
         NSLayoutConstraint.activate([
-            textStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            textStack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 10),
-            textStack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10),
-            trailingStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            trailingStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            trailingStack.leadingAnchor.constraint(greaterThanOrEqualTo: textStack.trailingAnchor, constant: 10),
-            chevron.widthAnchor.constraint(equalToConstant: 12),
-            chevron.heightAnchor.constraint(equalToConstant: 18),
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 58),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
         ])
-
-        // Tapping anywhere on a toggle row flips its switch — the
-        // normal iOS Settings gesture. Previously only the small
-        // switch itself responded, and row taps did nothing.
-        addTarget(self, action: #selector(rowTapped), for: .touchUpInside)
     }
 
-    @objc private func rowTapped() {
-        guard showsToggle else { return }
-        toggle.setOn(!toggle.isOn, animated: true)
-        toggle.sendActions(for: .valueChanged)
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-}
-
-// MARK: - Play button
-
-final class GPPlayButton: UIButton {
-    init(title: String) {
-        super.init(frame: .zero)
-        setTitle("▶  \(title)", for: .normal)
-        setTitleColor(GPTheme.accentInk, for: .normal)
-        titleLabel?.font = GPTheme.display(17, weight: .extrabold)
-        backgroundColor = GPTheme.accent
-        round(16)
-        contentEdgeInsets = UIEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-}
-
-// MARK: - Base view controller
-
-class GPBaseViewController: UIViewController {
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = GPTheme.bg
-    }
-
-    // GameParks screens are portrait-only (the approved design is a
-    // portrait phone UI). Only the stream screen is landscape; the app
-    // delegate asks the top view controller for its mask, so returning
-    // .portrait here locks every GameParks screen to portrait.
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        return .portrait
-    }
-
-    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
-        return .portrait
-    }
-
-    func showMessage(title: String, message: String, button: String = "OK") {
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: button, style: .default))
-        present(alert, animated: true)
-    }
-
-    /// Add a PC by typing its address — a primary way to connect, not a
-    /// fallback. It probes the PC directly over HTTP
-    /// (DiscoveryManager.discoverHost), so it never depends on Bonjour.
-    /// That matters because GameParks runs inside LiveContainer: Bonjour
-    /// browsing there is governed by the container app's own Info.plist,
-    /// not GameParks', so automatic discovery is not guaranteed to work.
-    func presentAddByAddress() {
-        let alert = UIAlertController(title: "Add a PC by address",
-                                      message: "Enter your PC's IP address on your home network (find it in Sunshine on the PC).",
-                                      preferredStyle: .alert)
-        alert.addTextField { field in
-            field.placeholder = "192.168.1.50"
-            field.keyboardType = .decimalPad
+    func configure(title: String, message: String, actionTitle: String?) {
+        titleLabel.text = title
+        messageLabel.text = message
+        if let actionTitle = actionTitle {
+            actionButton.setTitle(actionTitle, for: .normal)
+            actionButton.isHidden = false
+        } else {
+            actionButton.isHidden = true
         }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Add", style: .default) { [weak self] _ in
-            // Trim first: a whitespace-only "address" used to sail
-            // through to a misleading "PC not found" error.
-            let address = (alert.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !address.isEmpty else {
-                self?.showMessage(title: "Invalid address", message: "Enter your PC's IP address on your home network, like 192.168.1.50 — you can find it in Sunshine on the PC.")
-                return
-            }
-            GPEngine.shared.addHost(address: address) { [weak self] success, error in
-                if !success {
-                    self?.showMessage(title: "PC not found", message: error ?? "No PC answered at that address. Check the address and that Sunshine is running.")
-                }
-            }
-        })
-        present(alert, animated: true)
     }
 }

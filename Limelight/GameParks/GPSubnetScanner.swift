@@ -23,7 +23,7 @@
 
 import Foundation
 
-final class GPSubnetScanner {
+@objc final class GPSubnetScanner: NSObject {
     /// The GameStream HTTP port (Sunshine / GeForce Experience).
     private static let gameStreamPort: UInt16 = 47989
     private static let probeTimeoutMs: Int32 = 700
@@ -49,7 +49,7 @@ final class GPSubnetScanner {
 
     /// Invalidates any sweep still running; its remaining probes are
     /// skipped and its hosts are dropped.
-    func cancel() {
+    @objc func cancel() {
         _ = bumpGeneration()
     }
 
@@ -75,7 +75,7 @@ final class GPSubnetScanner {
     /// is called exactly once, on the main queue, with true if the
     /// sweep ran to completion and false if it was superseded,
     /// cancelled, or there was no subnet to sweep.
-    func scan(discoveryManager: DiscoveryManager,
+    @objc func scan(discoveryManager: DiscoveryManager,
               onHost: @escaping (TemporaryHost) -> Void,
               completion: @escaping (Bool) -> Void) {
         let gen = bumpGeneration()

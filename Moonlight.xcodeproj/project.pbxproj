@@ -9,10 +9,11 @@
 /* Begin PBXBuildFile section */
 		6A0000000000000000000033 /* GPTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000001 /* GPTheme.swift */; };
 		6A0000000000000000000034 /* GPComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000002 /* GPComponents.swift */; };
-		6A0000000000000000000035 /* GPGameMeta.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000003 /* GPGameMeta.swift */; };
 		6A0000000000000000000036 /* GPStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000004 /* GPStats.swift */; };
 		6A0000000000000000000071 /* GPSubnetScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000070 /* GPSubnetScanner.swift */; };
-		6A0000000000000000000037 /* GPEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000005 /* GPEngine.swift */; };
+		6A0000000000000000000082 /* GPSessionController.m in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000081 /* GPSessionController.m */; };
+		6A0000000000000000000084 /* GPCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000083 /* GPCatalog.swift */; };
+		6A0000000000000000000086 /* GPPairingViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000085 /* GPPairingViewController.swift */; };
 		6A0000000000000000000038 /* GPHomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000006 /* GPHomeViewController.swift */; };
 		6A0000000000000000000039 /* GPLibraryViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000007 /* GPLibraryViewController.swift */; };
 		6A0000000000000000000040 /* GPGameViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000008 /* GPGameViewController.swift */; };
@@ -22,8 +23,6 @@
 		6A0000000000000000000044 /* GPConnectingViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000012 /* GPConnectingViewController.swift */; };
 		6A0000000000000000000045 /* GPTabBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000013 /* GPTabBarController.swift */; };
 		6A0000000000000000000046 /* GPBootstrap.m in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000014 /* GPBootstrap.m */; };
-		6A0000000000000000000047 /* GPStreamConfigBuilder.m in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000015 /* GPStreamConfigBuilder.m */; };
-		6A0000000000000000000068 /* GPStreamLauncher.m in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000066 /* GPStreamLauncher.m */; };
 		6A0000000000000000000048 /* cover_cod.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000018 /* cover_cod.jpg */; };
 		6A0000000000000000000049 /* cover_gta5.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000019 /* cover_gta5.jpg */; };
 		6A0000000000000000000050 /* cover_mafia.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000020 /* cover_mafia.jpg */; };
@@ -204,10 +203,12 @@
 /* Begin PBXFileReference section */
 		6A0000000000000000000001 /* GPTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPTheme.swift; sourceTree = "<group>"; };
 		6A0000000000000000000002 /* GPComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPComponents.swift; sourceTree = "<group>"; };
-		6A0000000000000000000003 /* GPGameMeta.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPGameMeta.swift; sourceTree = "<group>"; };
 		6A0000000000000000000004 /* GPStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPStats.swift; sourceTree = "<group>"; };
 		6A0000000000000000000070 /* GPSubnetScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPSubnetScanner.swift; sourceTree = "<group>"; };
-		6A0000000000000000000005 /* GPEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPEngine.swift; sourceTree = "<group>"; };
+		6A0000000000000000000080 /* GPSessionController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GPSessionController.h; sourceTree = "<group>"; };
+		6A0000000000000000000081 /* GPSessionController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GPSessionController.m; sourceTree = "<group>"; };
+		6A0000000000000000000083 /* GPCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPCatalog.swift; sourceTree = "<group>"; };
+		6A0000000000000000000085 /* GPPairingViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPPairingViewController.swift; sourceTree = "<group>"; };
 		6A0000000000000000000006 /* GPHomeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPHomeViewController.swift; sourceTree = "<group>"; };
 		6A0000000000000000000007 /* GPLibraryViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPLibraryViewController.swift; sourceTree = "<group>"; };
 		6A0000000000000000000008 /* GPGameViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPGameViewController.swift; sourceTree = "<group>"; };
@@ -217,11 +218,7 @@
 		6A0000000000000000000012 /* GPConnectingViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPConnectingViewController.swift; sourceTree = "<group>"; };
 		6A0000000000000000000013 /* GPTabBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPTabBarController.swift; sourceTree = "<group>"; };
 		6A0000000000000000000014 /* GPBootstrap.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GPBootstrap.m; sourceTree = "<group>"; };
-		6A0000000000000000000015 /* GPStreamConfigBuilder.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GPStreamConfigBuilder.m; sourceTree = "<group>"; };
 		6A0000000000000000000016 /* GPBootstrap.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GPBootstrap.h; sourceTree = "<group>"; };
-		6A0000000000000000000017 /* GPStreamConfigBuilder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GPStreamConfigBuilder.h; sourceTree = "<group>"; };
-		6A0000000000000000000066 /* GPStreamLauncher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GPStreamLauncher.m; sourceTree = "<group>"; };
-		6A0000000000000000000067 /* GPStreamLauncher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GPStreamLauncher.h; sourceTree = "<group>"; };
 		6A0000000000000000000018 /* cover_cod.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_cod.jpg; sourceTree = "<group>"; };
 		6A0000000000000000000019 /* cover_gta5.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_gta5.jpg; sourceTree = "<group>"; };
 		6A0000000000000000000020 /* cover_mafia.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_mafia.jpg; sourceTree = "<group>"; };
@@ -437,10 +434,12 @@
 			children = (
 				6A0000000000000000000001 /* GPTheme.swift */,
 				6A0000000000000000000002 /* GPComponents.swift */,
-				6A0000000000000000000003 /* GPGameMeta.swift */,
 				6A0000000000000000000004 /* GPStats.swift */,
-				6A0000000000000000000005 /* GPEngine.swift */,
 				6A0000000000000000000070 /* GPSubnetScanner.swift */,
+				6A0000000000000000000080 /* GPSessionController.h */,
+				6A0000000000000000000081 /* GPSessionController.m */,
+				6A0000000000000000000083 /* GPCatalog.swift */,
+				6A0000000000000000000085 /* GPPairingViewController.swift */,
 				6A0000000000000000000006 /* GPHomeViewController.swift */,
 				6A0000000000000000000007 /* GPLibraryViewController.swift */,
 				6A0000000000000000000008 /* GPGameViewController.swift */,
@@ -450,11 +449,7 @@
 				6A0000000000000000000012 /* GPConnectingViewController.swift */,
 				6A0000000000000000000013 /* GPTabBarController.swift */,
 				6A0000000000000000000014 /* GPBootstrap.m */,
-				6A0000000000000000000015 /* GPStreamConfigBuilder.m */,
 				6A0000000000000000000016 /* GPBootstrap.h */,
-				6A0000000000000000000017 /* GPStreamConfigBuilder.h */,
-				6A0000000000000000000066 /* GPStreamLauncher.m */,
-				6A0000000000000000000067 /* GPStreamLauncher.h */,
 				6A0000000000000000000064 /* Covers */,
 				6A0000000000000000000065 /* Fonts */,
 			);
@@ -1077,10 +1072,11 @@
 				988FCD41293B091B003050E2 /* KeyboardInputField.m in Sources */,
 				6A0000000000000000000033 /* GPTheme.swift in Sources */,
 				6A0000000000000000000034 /* GPComponents.swift in Sources */,
-				6A0000000000000000000035 /* GPGameMeta.swift in Sources */,
 				6A0000000000000000000036 /* GPStats.swift in Sources */,
-				6A0000000000000000000037 /* GPEngine.swift in Sources */,
 				6A0000000000000000000071 /* GPSubnetScanner.swift in Sources */,
+				6A0000000000000000000082 /* GPSessionController.m in Sources */,
+				6A0000000000000000000084 /* GPCatalog.swift in Sources */,
+				6A0000000000000000000086 /* GPPairingViewController.swift in Sources */,
 				6A0000000000000000000038 /* GPHomeViewController.swift in Sources */,
 				6A0000000000000000000039 /* GPLibraryViewController.swift in Sources */,
 				6A0000000000000000000040 /* GPGameViewController.swift in Sources */,
@@ -1090,8 +1086,6 @@
 				6A0000000000000000000044 /* GPConnectingViewController.swift in Sources */,
 				6A0000000000000000000045 /* GPTabBarController.swift in Sources */,
 				6A0000000000000000000046 /* GPBootstrap.m in Sources */,
-				6A0000000000000000000047 /* GPStreamConfigBuilder.m in Sources */,
-				6A0000000000000000000068 /* GPStreamLauncher.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1364,7 +1358,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = "Limelight/Limelight-Prefix.pch";
 				HEADER_SEARCH_PATHS = (
@@ -1393,7 +1387,7 @@
 					"$(PROJECT_DIR)/libs/SDL2/lib/iOS-Sim",
 					"$(PROJECT_DIR)/libs/FFmpeg/lib/iOS-Sim",
 				);
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.gameparks.GameParks";
 				PRODUCT_NAME = GameParks;
 				PROVISIONING_PROFILE = "";
@@ -1414,7 +1408,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = "Limelight/Limelight-Prefix.pch";
 				HEADER_SEARCH_PATHS = (
@@ -1443,7 +1437,7 @@
 					"$(PROJECT_DIR)/libs/SDL2/lib/iOS-Sim",
 					"$(PROJECT_DIR)/libs/FFmpeg/lib/iOS-Sim",
 				);
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.gameparks.GameParks";
 				PRODUCT_NAME = GameParks;
 				PROVISIONING_PROFILE = "";

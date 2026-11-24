@@ -2,543 +2,328 @@
 //  GPHomeViewController.swift
 //  GameParks
 //
-//  Home in the approved design: greeting, the host status card,
-//  a Continue Playing hero, then poster rails —
-//  "Jump back in" (Steam library) and "Your classics" (your own copies).
+//  The design's Home: greeting, the live PC card, Continue Playing,
+//  "Jump back in" and "Your classics". Everything renders from
+//  GPSessionController's state; every tap navigates first and lets
+//  the destination screen load — nothing network-shaped ever sits
+//  in front of a push.
 //
 
 import UIKit
 
-/// The host status card, factored out so a state-only change (online,
-/// ping, pairing) can update its labels IN PLACE. Recreating the card
-/// on every host-list notification destroyed in-flight touches — the
-/// card is the screen's main tap target.
-private final class GPHostCardView: UIControl {
-    private let dot = UIView()
-    private let titleLabel = GPLabel("", font: GPTheme.display(17, weight: .bold), color: GPTheme.ink)
-    private let subtitleLabel = GPLabel("", font: GPTheme.body(12.5, weight: .semibold), color: GPTheme.mut, lines: 2)
-    private let trailingLabel = GPLabel("", font: GPTheme.display(15, weight: .bold), color: GPTheme.accent)
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = GPTheme.panel
-        round(18)
-
-        dot.round(5)
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        dot.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        dot.heightAnchor.constraint(equalToConstant: 10).isActive = true
-
-        let textStack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
-        textStack.axis = .vertical
-        textStack.spacing = 3
-
-        let row = UIStackView(arrangedSubviews: [dot, textStack, trailingLabel])
-        row.axis = .horizontal
-        row.spacing = 12
-        row.alignment = .center
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
-        ])
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func update(name: String, subtitle: String, online: Bool, pingText: String) {
-        titleLabel.text = name
-        subtitleLabel.text = subtitle
-        dot.backgroundColor = online ? GPTheme.live : GPTheme.dim
-        trailingLabel.text = pingText
-    }
-}
-
-/// A wide game row that carries its app with it, instead of smuggling
-/// the app id through accessibilityIdentifier and re-resolving it
-/// against a possibly-changed list at tap time.
-private final class GPAppRow: GPRow {
-    var app: TemporaryApp?
-}
-
 final class GPHomeViewController: GPBaseViewController {
-    private let scrollView = UIScrollView()
-    private let stack = UIStackView()
-    private var bigRail: UICollectionView!
-    private var classicsRail: UICollectionView!
-    private var bigApps: [TemporaryApp] = []
-    private var classicApps: [TemporaryApp] = []
-    private var heroApp: TemporaryApp?
-
-    private weak var hostCard: GPHostCardView?
-    private weak var emptyStateLabel: UILabel?
-    private var lastStructureSignature: String?
-    private var lastStateSignature: String?
-
-    private enum RailTag {
-        static let big = 1
-        static let classics = 2
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-    }
+    private let dynamicStack = UIStackView()
+    private let refreshControl = UIRefreshControl()
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // Card/row taps must not wait for scroll-vs-tap disambiguation.
-        scrollView.delaysContentTouches = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scrollView)
+        let hour = Calendar.current.component(.hour, from: Date())
+        let greeting = hour < 12 ? "Good morning" : (hour < 17 ? "Good afternoon" : "Good evening")
+        contentStack.addArrangedSubview(makeHeader(title: greeting, subtitle: "Ready to play, Glenda?"))
 
-        let refreshControl = UIRefreshControl()
-        refreshControl.addTarget(self, action: #selector(refreshPulled(_:)), for: .valueChanged)
+        dynamicStack.axis = .vertical
+        dynamicStack.spacing = 16
+        contentStack.addArrangedSubview(dynamicStack)
+
+        refreshControl.tintColor = GPColor.accent
+        refreshControl.addTarget(self, action: #selector(pulledToRefresh), for: .valueChanged)
         scrollView.refreshControl = refreshControl
 
-        stack.axis = .vertical
-        stack.spacing = 26
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(stack)
-
-        bigRail = makeRail(tag: RailTag.big)
-        classicsRail = makeRail(tag: RailTag.classics)
-
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 18),
-            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -24),
-            stack.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor, constant: -20),
-        ])
-
-        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .gpHostsChanged, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .gpAppListChanged, object: nil)
-        reload()
+        NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
+                                               name: GPHostsChangedNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
+                                               name: GPAppListChangedNotification, object: nil)
+        rebuild()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        GPEngine.shared.scanLocalNetwork()
-        reload()
+        rebuild()
     }
 
-    @objc private func refreshPulled(_ sender: UIRefreshControl) {
-        GPEngine.shared.scanLocalNetwork(force: true) {
-            sender.endRefreshing()
-        }
-        // Belt and braces: the spinner must end even if a scan
-        // completion is ever dropped.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
-            sender.endRefreshing()
-        }
+    @objc private func stateChanged() {
+        rebuild()
     }
 
-    private func makeRail(tag: Int) -> UICollectionView {
-        let layout = UICollectionViewFlowLayout()
-        layout.scrollDirection = .horizontal
-        // Poster (118 × 1.42 ≈ 168) + 7 spacing + two title lines +
-        // subtitle ≈ 222 — the old 208 clipped the second line.
-        layout.itemSize = CGSize(width: 118, height: 224)
-        layout.minimumLineSpacing = 14
-        let collection = UICollectionView(frame: .zero, collectionViewLayout: layout)
-        collection.tag = tag
-        collection.backgroundColor = .clear
-        collection.showsHorizontalScrollIndicator = false
-        collection.dataSource = self
-        collection.delegate = self
-        collection.register(GPPosterCell.self, forCellWithReuseIdentifier: GPPosterCell.reuseID)
-        collection.translatesAutoresizingMaskIntoConstraints = false
-        collection.heightAnchor.constraint(equalToConstant: 224).isActive = true
-        return collection
-    }
-
-    // MARK: - Building the screen
-
-    /// Two-tier rebuild. The STRUCTURE (which host, which games, the
-    /// greeting hour, the stats revision) changes rarely; when only
-    /// the host's STATE changed (online, paired, ping), the card and
-    /// the empty-state message update in place and nothing is torn
-    /// down — a teardown mid-tap is what ate the user's taps in v1.1.
-    @objc private func reload() {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.reload() }
-            return
-        }
-        guard isViewLoaded else { return }
-        let engine = GPEngine.shared
-        let host = engine.selectedHost
-        let apps = host.map { engine.sortedApps(for: $0) } ?? []
-        let structure = structureSignature(host: host, apps: apps)
-        let state = stateSignature(host: host)
-        if structure == lastStructureSignature {
-            if state != lastStateSignature {
-                lastStateSignature = state
-                updateHostCardInPlace(host: host)
-            }
-            return
-        }
-        lastStructureSignature = structure
-        lastStateSignature = state
-        rebuildContent(host: host, apps: apps)
-    }
-
-    private func structureSignature(host: TemporaryHost?, apps: [TemporaryApp]) -> String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        let appIds = apps.map { $0.id ?? $0.name ?? "?" }.joined(separator: ",")
-        return "h:\(hour)|host:\(host?.uuid ?? "none")|apps:\(appIds)|stats:\(GPStats.shared.revision)"
-    }
-
-    private func stateSignature(host: TemporaryHost?) -> String {
-        guard let host = host else { return "none" }
-        let ping = GPEngine.shared.ping(for: host).map { "\($0)" } ?? "-"
-        return "\(host.state.rawValue)/\(host.pairState.rawValue)/\(host.name)/\(ping)"
-    }
-
-    private func updateHostCardInPlace(host: TemporaryHost?) {
-        hostCard?.update(name: host?.name ?? "No PC yet",
-                         subtitle: hostStatusText(host),
-                         online: host?.state == .online,
-                         pingText: pingText(for: host))
-        if let label = emptyStateLabel, let host = host {
-            label.text = emptyAppsMessage(for: host)
+    @objc private func pulledToRefresh() {
+        GPSessionController.shared.rescanLocalNetwork()
+        // The scan reports through the normal notifications; stop
+        // the spinner shortly after regardless.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.refreshControl.endRefreshing()
         }
     }
 
-    private func pingText(for host: TemporaryHost?) -> String {
-        guard let host = host, host.state == .online, let ping = GPEngine.shared.ping(for: host) else {
-            return ""
-        }
-        return "\(ping) ms"
-    }
+    // MARK: - Rendering
 
-    private func rebuildContent(host: TemporaryHost?, apps: [TemporaryApp]) {
-        // Preserve the scroll position across the rebuild: resetting
-        // it to the top on every genuine change felt like the app
-        // jumping around under the user's finger.
-        let savedOffsetY = scrollView.contentOffset.y
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let engine = GPEngine.shared
+    private func rebuild() {
+        dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let session = GPSessionController.shared
 
-        // Greeting
-        let greetingStack = UIStackView()
-        greetingStack.axis = .vertical
-        greetingStack.spacing = 4
-        greetingStack.addArrangedSubview(GPLabel(greetingText(), font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink))
-        greetingStack.addArrangedSubview(GPLabel("Ready to play, Glenda?", font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut))
-        stack.addArrangedSubview(greetingStack)
-
-        // Host card
-        stack.addArrangedSubview(makeHostCard(host: host))
-
-        guard let host = host else {
-            stack.addArrangedSubview(GPLabel("No PC found yet. Make sure Sunshine is running on your PC and both devices are on the same Wi-Fi. If your PC doesn't appear on its own, add it directly by its address:",
-                                             font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut, lines: 0))
-            let addButton = UIButton(type: .system)
-            addButton.setTitle("Add your PC by address", for: .normal)
-            addButton.setTitleColor(GPTheme.accentInk, for: .normal)
-            addButton.titleLabel?.font = GPTheme.display(17, weight: .extrabold)
-            addButton.backgroundColor = GPTheme.accent
-            addButton.round(16)
-            addButton.contentEdgeInsets = UIEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
-            addButton.addTarget(self, action: #selector(addByAddressTapped), for: .touchUpInside)
-            stack.addArrangedSubview(addButton)
-            let searchButton = UIButton(type: .system)
-            searchButton.setTitle("Search again", for: .normal)
-            searchButton.setTitleColor(GPTheme.accent, for: .normal)
-            searchButton.titleLabel?.font = GPTheme.body(15, weight: .bold)
-            searchButton.addTarget(self, action: #selector(searchAgainTapped), for: .touchUpInside)
-            stack.addArrangedSubview(searchButton)
-            restoreScrollOffset(savedOffsetY)
+        guard let host = session.selectedHost ?? session.hosts.first else {
+            dynamicStack.addArrangedSubview(searchingView())
             return
         }
 
-        // One metadata pass, partitioned once — the old code re-ran
-        // the lookup three times per app on every rebuild.
-        let metas = apps.map { (app: $0, meta: GPGameMeta.meta(forAppName: $0.name ?? "")) }
-        bigApps = metas.filter { $0.meta.group == .big }.map { $0.app }
-        classicApps = metas.filter { $0.meta.group == .classic }.map { $0.app }
-        let otherApps = metas.filter { $0.meta.group != .big && $0.meta.group != .classic }.map { $0.app }
+        dynamicStack.addArrangedSubview(hostCard(for: host))
 
-        // Continue Playing hero: the most recently played game, else the first big game.
-        heroApp = mostRecentApp(in: apps) ?? bigApps.first ?? apps.first
-        if let hero = heroApp {
-            stack.addArrangedSubview(makeHero(app: hero, host: host))
-        }
-
-        if !bigApps.isEmpty {
-            stack.addArrangedSubview(makeSectionHeader(title: "Jump back in", trailing: "Steam library"))
-            stack.addArrangedSubview(bigRail)
-            bigRail.reloadData()
-        }
-        if !classicApps.isEmpty {
-            stack.addArrangedSubview(makeSectionHeader(title: "Your classics", trailing: "Your own copies"))
-            stack.addArrangedSubview(classicsRail)
-            classicsRail.reloadData()
-        }
-        if !otherApps.isEmpty {
-            stack.addArrangedSubview(makeSectionHeader(title: "More on \(host.name)", trailing: ""))
-            for app in otherApps {
-                stack.addArrangedSubview(makeWideRow(app: app, host: host))
+        switch host.pairState {
+        case .paired:
+            rebuildPairedContent(for: host)
+        default:
+            if host.state == .offline {
+                let message = GPMessageView()
+                message.configure(
+                    title: "Your PC looks offline",
+                    message: "If it's asleep, open its page and tap Wake PC. If it's on, check Sunshine is running.",
+                    actionTitle: "Open PC page")
+                message.actionButton.addTarget(self, action: #selector(openSelectedHostPage), for: .touchUpInside)
+                dynamicStack.addArrangedSubview(message)
+            } else {
+                let message = GPMessageView()
+                message.configure(
+                    title: "Not paired yet",
+                    message: "This PC is not paired yet. Tap the card above to pair — one PIN, entered once — and your games will appear here.",
+                    actionTitle: nil)
+                dynamicStack.addArrangedSubview(message)
             }
         }
+    }
+
+    private func rebuildPairedContent(for host: TemporaryHost) {
+        let session = GPSessionController.shared
+        let apps = GPCatalog.sortedApps(for: host)
+
         if apps.isEmpty {
-            let message = GPLabel(emptyAppsMessage(for: host),
-                                  font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut, lines: 0)
-            emptyStateLabel = message
-            stack.addArrangedSubview(message)
-        }
-        restoreScrollOffset(savedOffsetY)
-    }
-
-    private func restoreScrollOffset(_ y: CGFloat) {
-        guard y > 0 else { return }
-        view.layoutIfNeeded()
-        let maxY = max(0, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-        scrollView.contentOffset.y = min(y, maxY)
-    }
-
-    private func emptyAppsMessage(for host: TemporaryHost) -> String {
-        if host.pairState != .paired {
-            return "This PC is not paired yet. Tap the card above to pair — one PIN, entered once — and your games will appear here."
-        } else if host.state != .online {
-            return "Your PC is asleep or offline. Tap the card above to wake it, and your games will appear here."
-        } else {
-            return "No games found on this PC yet. Add your games in Sunshine on the PC — Steam titles and your own installs both appear here automatically."
-        }
-    }
-
-    private func greetingText() -> String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        switch hour {
-        case 5..<12: return "Good morning"
-        case 12..<17: return "Good afternoon"
-        case 17..<23: return "Good evening"
-        default: return "Up late?"
-        }
-    }
-
-    private func mostRecentApp(in apps: [TemporaryApp]) -> TemporaryApp? {
-        guard let host = GPEngine.shared.selectedHost else { return nil }
-        var best: TemporaryApp?
-        var bestDate = Date.distantPast
-        for app in apps {
-            let key = GPStats.appKey(host: host, app: app)
-            if let date = GPStats.shared.lastPlayed(forAppKey: key), date > bestDate {
-                bestDate = date
-                best = app
+            let message = GPMessageView()
+            if let error = session.appListError(for: host) {
+                message.configure(
+                    title: "Couldn't load your games",
+                    message: error,
+                    actionTitle: "Try again")
+            } else {
+                message.configure(
+                    title: "No games found on this PC yet",
+                    message: "Games appear here once they're in Sunshine's app list on the PC. Desktop and Steam games are added by Sunshine itself; your own installs can be added there too.",
+                    actionTitle: "Check again")
             }
+            message.actionButton.addTarget(self, action: #selector(retryAppList), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(message)
+            return
         }
-        return best
+
+        // Continue playing: the most recently played game that's
+        // still in the list.
+        let lastPlayed = apps
+            .map { (app: $0, date: GPStats.shared.lastPlayed(forAppKey: GPCatalog.appKey(host: host, app: $0))) }
+            .filter { $0.date != nil }
+            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+            .first
+        if let hero = lastPlayed {
+            dynamicStack.addArrangedSubview(gpSectionHeader("Continue playing"))
+            dynamicStack.addArrangedSubview(heroCard(host: host, app: hero.app))
+        }
+
+        let bigGames = apps.filter { !GPCatalog.info(for: $0).isClassic && !GPCatalog.isDesktop($0) }
+        if !bigGames.isEmpty {
+            dynamicStack.addArrangedSubview(gpSectionHeader("Jump back in", subtitle: "Steam library"))
+            dynamicStack.addArrangedSubview(rail(for: host, apps: bigGames))
+        }
+
+        let classics = apps.filter { GPCatalog.info(for: $0).isClassic }
+        if !classics.isEmpty {
+            dynamicStack.addArrangedSubview(gpSectionHeader("Your classics", subtitle: "Your own copies"))
+            dynamicStack.addArrangedSubview(rail(for: host, apps: classics))
+        }
+
+        if let desktop = apps.first(where: { GPCatalog.isDesktop($0) }) {
+            let card = GPCardButton()
+            card.stack.addArrangedSubview(gpLabel("Stream Desktop", font: GPFont.display(17, weight: .bold), color: GPColor.textPrimary, lines: 1))
+            card.stack.addArrangedSubview(gpLabel("Your PC's desktop, on this phone", font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
+            card.addTarget(self, action: #selector(desktopCardTapped), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(card)
+            _ = desktop
+        }
     }
 
-    private func makeSectionHeader(title: String, trailing: String) -> UIView {
-        let container = UIView()
-        let titleLabel = GPLabel(title, font: GPTheme.display(19, weight: .bold), color: GPTheme.ink)
-        let trailingLabel = GPLabel(trailing, font: GPTheme.body(12, weight: .bold), color: GPTheme.dim)
-        container.addSubview(titleLabel)
-        container.addSubview(trailingLabel)
-        NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor),
-            titleLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingLabel.leadingAnchor, constant: -8),
-            trailingLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            trailingLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-        ])
+    private func searchingView() -> UIView {
+        let container = UIStackView()
+        container.axis = .vertical
+        container.spacing = 16
+
+        let message = GPMessageView()
+        message.configure(
+            title: "No PC found yet",
+            message: "GameParks searches your home network by itself. Make sure your PC is on, Sunshine is running, and this phone is on the same Wi-Fi as the PC.",
+            actionTitle: "Search again")
+        message.actionButton.addTarget(self, action: #selector(searchAgainTapped), for: .touchUpInside)
+        container.addArrangedSubview(message)
+
+        let addButton = gpSecondaryButton("Add your PC by address")
+        addButton.addTarget(self, action: #selector(addByAddressTapped), for: .touchUpInside)
+        container.addArrangedSubview(addButton)
         return container
     }
 
-    private func makeHostCard(host: TemporaryHost?) -> UIView {
-        let card = GPHostCardView()
+    private func hostCard(for host: TemporaryHost) -> UIView {
+        let card = GPCardButton()
+
+        let dot = UIView()
+        dot.backgroundColor = host.state == .online ? GPColor.success
+            : (host.state == .offline ? GPColor.danger : GPColor.warning)
+        dot.layer.cornerRadius = 5
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 10),
+            dot.heightAnchor.constraint(equalToConstant: 10),
+        ])
+
+        let nameLabel = gpLabel(host.name, font: GPFont.display(18, weight: .bold), color: GPColor.textPrimary, lines: 1)
+        let titleRow = UIStackView(arrangedSubviews: [dot, nameLabel])
+        titleRow.axis = .horizontal
+        titleRow.alignment = .center
+        titleRow.spacing = 10
+        card.stack.addArrangedSubview(titleRow)
+
+        let statusText: String
+        switch (host.state, host.pairState) {
+        case (.online, .paired):
+            statusText = "Online · Home Wi-Fi · Sunshine ready"
+        case (.online, _):
+            statusText = "Online · Not paired — tap to pair"
+        case (.offline, _):
+            statusText = "Offline"
+        default:
+            statusText = "Connecting…"
+        }
+        card.stack.addArrangedSubview(gpLabel(statusText, font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
+
+        let session = GPSessionController.shared
+        if host.state == .online, session.lastPingMs(for: host) >= 0 {
+            card.stack.addArrangedSubview(gpLabel("\(session.lastPingMs(for: host)) ms", font: GPFont.body(12, weight: .semibold), color: GPColor.accent, lines: 1))
+        }
+
         card.addTarget(self, action: #selector(hostCardTapped), for: .touchUpInside)
-        card.update(name: host?.name ?? "No PC yet",
-                    subtitle: hostStatusText(host),
-                    online: host?.state == .online,
-                    pingText: pingText(for: host))
-        // With no PC there is nothing to open: the card is inert
-        // rather than silently swallowing taps.
-        card.isEnabled = host != nil
-        hostCard = card
         return card
     }
 
-    private func hostStatusText(_ host: TemporaryHost?) -> String {
-        guard let host = host else {
-            return "Searching for PCs on your network…"
-        }
-        switch host.state {
-        case .online:
-            if host.pairState == .paired {
-                return "Online · Home Wi-Fi · Sunshine ready"
-            }
-            return "Online · Not paired — tap to pair"
-        case .offline:
-            return "Asleep · tap to wake"
-        default:
-            return "Searching…"
-        }
+    private func heroCard(host: TemporaryHost, app: TemporaryApp) -> UIView {
+        let card = GPCardButton()
+        let key = GPCatalog.appKey(host: host, app: app)
+        card.stack.addArrangedSubview(gpLabel(app.name, font: GPFont.display(20, weight: .extrabold), color: GPColor.textPrimary, lines: 2))
+        let played = GPStats.shared.seconds(forAppKey: key)
+        let subtitle = played > 0
+            ? "\(gpFormatPlaytime(played)) played · Last played \(gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key)).lowercased())"
+            : "Last played \(gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key)).lowercased())"
+        card.stack.addArrangedSubview(gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
+
+        let playPill = gpLabel("  ▶  Play  ", font: GPFont.display(14, weight: .bold), color: GPColor.onAccent, lines: 1)
+        playPill.backgroundColor = GPColor.accent
+        playPill.layer.cornerRadius = 10
+        playPill.clipsToBounds = true
+        playPill.textAlignment = .center
+        let pillRow = UIStackView(arrangedSubviews: [playPill, UIView()])
+        pillRow.axis = .horizontal
+        card.stack.addArrangedSubview(pillRow)
+
+        card.addTarget(self, action: #selector(heroCardTapped), for: .touchUpInside)
+        return card
     }
 
-    private func makeHero(app: TemporaryApp, host: TemporaryHost) -> UIView {
-        let hero = UIControl()
-        hero.round(20)
-        hero.backgroundColor = GPTheme.panel2
-        hero.addTarget(self, action: #selector(heroTapped), for: .touchUpInside)
+    private func rail(for host: TemporaryHost, apps: [TemporaryApp]) -> UIView {
+        let scroll = UIScrollView()
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.delaysContentTouches = false
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.spacing = 12
+        row.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(row)
 
-        let image = UIImageView()
-        image.image = GPCoverArt.cover(for: app)
-        image.contentMode = .scaleAspectFill
-        image.clipsToBounds = true
-        image.translatesAutoresizingMaskIntoConstraints = false
-        hero.addSubview(image)
-
-        let scrim = UIView()
-        scrim.backgroundColor = UIColor(hex: 0x05060A, alpha: 0.45)
-        scrim.translatesAutoresizingMaskIntoConstraints = false
-        hero.addSubview(scrim)
-
-        let key = GPStats.appKey(host: host, app: app)
-        let playtime = GPStats.shared.playtime(forAppKey: key)
-        var metaParts: [String] = []
-        if playtime > 0 {
-            metaParts.append("\(GPFormatPlaytime(playtime)) played")
+        for app in apps.prefix(10) {
+            let key = GPCatalog.appKey(host: host, app: app)
+            let played = GPStats.shared.seconds(forAppKey: key)
+            let info = GPCatalog.info(for: app)
+            let poster = GPPosterView()
+            poster.configure(name: app.name ?? "",
+                             subtitle: played > 0 ? "\(gpFormatPlaytime(played)) played" : info.sourceTag,
+                             cover: GPCatalog.coverImage(for: app))
+            poster.translatesAutoresizingMaskIntoConstraints = false
+            poster.widthAnchor.constraint(equalToConstant: 118).isActive = true
+            poster.addTarget(self, action: #selector(posterTapped(_:)), for: .touchUpInside)
+            poster.accessibilityIdentifier = key
+            row.addArrangedSubview(poster)
         }
-        if let last = GPStats.shared.lastPlayed(forAppKey: key) {
-            metaParts.append("Last played \(GPFormatLastPlayed(last))")
-        }
-        let meta = metaParts.isEmpty ? "Ready when you are" : metaParts.joined(separator: " · ")
-
-        let kicker = GPLabel("Continue playing", font: GPTheme.body(11, weight: .extrabold), color: GPTheme.accent)
-        kicker.text = kicker.text?.uppercased()
-        let title = GPLabel(app.name ?? "", font: GPTheme.display(24, weight: .extrabold), color: .white, lines: 2)
-        let metaLabel = GPLabel(meta, font: GPTheme.body(13, weight: .semibold), color: UIColor(hex: 0xD7DCEA), lines: 2)
-
-        let playButton = GPPlayButton(title: "Play")
-        playButton.isUserInteractionEnabled = false
-
-        let textStack = UIStackView(arrangedSubviews: [kicker, title, metaLabel])
-        textStack.axis = .vertical
-        textStack.spacing = 5
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        hero.addSubview(textStack)
-        playButton.translatesAutoresizingMaskIntoConstraints = false
-        hero.addSubview(playButton)
 
         NSLayoutConstraint.activate([
-            hero.heightAnchor.constraint(equalTo: hero.widthAnchor, multiplier: 0.62),
-            image.topAnchor.constraint(equalTo: hero.topAnchor),
-            image.bottomAnchor.constraint(equalTo: hero.bottomAnchor),
-            image.leadingAnchor.constraint(equalTo: hero.leadingAnchor),
-            image.trailingAnchor.constraint(equalTo: hero.trailingAnchor),
-            scrim.topAnchor.constraint(equalTo: hero.topAnchor),
-            scrim.bottomAnchor.constraint(equalTo: hero.bottomAnchor),
-            scrim.leadingAnchor.constraint(equalTo: hero.leadingAnchor),
-            scrim.trailingAnchor.constraint(equalTo: hero.trailingAnchor),
-            textStack.leadingAnchor.constraint(equalTo: hero.leadingAnchor, constant: 18),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: hero.trailingAnchor, constant: -18),
-            textStack.topAnchor.constraint(greaterThanOrEqualTo: hero.topAnchor, constant: 14),
-            textStack.bottomAnchor.constraint(equalTo: playButton.topAnchor, constant: -12),
-            playButton.leadingAnchor.constraint(equalTo: hero.leadingAnchor, constant: 18),
-            playButton.bottomAnchor.constraint(equalTo: hero.bottomAnchor, constant: -16),
+            row.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            row.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            row.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
         ])
-        return hero
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.heightAnchor.constraint(equalToConstant: 218).isActive = true
+        return scroll
     }
 
-    private func makeWideRow(app: TemporaryApp, host: TemporaryHost) -> UIView {
-        let row = GPAppRow(title: app.name ?? "", subtitle: GPGameMeta.meta(forAppName: app.name ?? "").genreLine)
-        row.app = app
-        row.addTarget(self, action: #selector(wideRowTapped(_:)), for: .touchUpInside)
-        return row
+    // MARK: - Actions — navigation is always the first thing
+
+    @objc private func hostCardTapped() {
+        guard let host = GPSessionController.shared.selectedHost
+                ?? GPSessionController.shared.hosts.first else { return }
+        GPSessionController.shared.selectHost(host)
+        navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
     }
 
-    // MARK: - Actions
+    @objc private func openSelectedHostPage() {
+        hostCardTapped()
+    }
+
+    @objc private func heroCardTapped() {
+        guard let host = currentHost(),
+              let app = mostRecentApp(for: host) else { return }
+        navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)
+    }
+
+    @objc private func desktopCardTapped() {
+        guard let host = currentHost(),
+              let desktop = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.isDesktop($0) }) else { return }
+        navigationController?.pushViewController(GPGameViewController(host: host, app: desktop), animated: true)
+    }
+
+    @objc private func posterTapped(_ sender: GPPosterView) {
+        guard let host = currentHost(), let key = sender.accessibilityIdentifier,
+              let app = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.appKey(host: host, app: $0) == key })
+        else { return }
+        navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)
+    }
+
+    @objc private func retryAppList() {
+        guard let host = currentHost() else { return }
+        GPSessionController.shared.fetchAppList(for: host)
+    }
+
+    @objc private func searchAgainTapped() {
+        GPSessionController.shared.rescanLocalNetwork()
+    }
 
     @objc private func addByAddressTapped() {
         presentAddByAddress()
     }
 
-    @objc private func searchAgainTapped() {
-        GPEngine.shared.scanLocalNetwork(force: true)
+    // MARK: - Helpers
+
+    private func currentHost() -> TemporaryHost? {
+        return GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first
     }
 
-    @objc private func hostCardTapped() {
-        guard let host = GPEngine.shared.selectedHost else { return }
-        if host.state == .offline {
-            GPEngine.shared.wake(host)
-        }
-        let hostVC = GPHostViewController(host: host)
-        navigationController?.pushViewController(hostVC, animated: true)
-    }
-
-    @objc private func heroTapped() {
-        guard let app = heroApp else { return }
-        openGame(app)
-    }
-
-    @objc private func wideRowTapped(_ sender: GPAppRow) {
-        guard let app = sender.app else { return }
-        openGame(app)
-    }
-
-    private func openGame(_ app: TemporaryApp) {
-        let gameVC = GPGameViewController(app: app)
-        navigationController?.pushViewController(gameVC, animated: true)
-    }
-}
-
-// MARK: - Rails
-
-extension GPHomeViewController: UICollectionViewDataSource, UICollectionViewDelegate {
-    private func railApps(for collectionView: UICollectionView) -> [TemporaryApp] {
-        switch collectionView.tag {
-        case RailTag.big:
-            return bigApps
-        case RailTag.classics:
-            return classicApps
-        default:
-            return []
-        }
-    }
-
-    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        return railApps(for: collectionView).count
-    }
-
-    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        let apps = railApps(for: collectionView)
-        guard apps.indices.contains(indexPath.item),
-              let cell = collectionView.dequeueReusableCell(withReuseIdentifier: GPPosterCell.reuseID, for: indexPath) as? GPPosterCell else {
-            // A notification can shrink the list between the count
-            // query and cell creation; a blank cell beats a crash.
-            return UICollectionViewCell()
-        }
-        let app = apps[indexPath.item]
-        let meta = GPGameMeta.meta(forAppName: app.name ?? "")
-        var subtitle: String
-        if collectionView.tag == RailTag.classics {
-            subtitle = meta.sourceTag
-        } else if let host = GPEngine.shared.selectedHost {
-            let playtime = GPStats.shared.playtime(forAppKey: GPStats.appKey(host: host, app: app))
-            subtitle = playtime > 0 ? "\(GPFormatPlaytime(playtime)) played" : meta.sourceTag
-        } else {
-            subtitle = meta.sourceTag
-        }
-        cell.configure(app: app, subtitle: subtitle, badge: nil)
-        return cell
-    }
-
-    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        let apps = railApps(for: collectionView)
-        guard apps.indices.contains(indexPath.item) else { return }
-        openGame(apps[indexPath.item])
+    private func mostRecentApp(for host: TemporaryHost) -> TemporaryApp? {
+        return GPCatalog.sortedApps(for: host)
+            .map { (app: $0, date: GPStats.shared.lastPlayed(forAppKey: GPCatalog.appKey(host: host, app: $0))) }
+            .filter { $0.date != nil }
+            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+            .first?.app
     }
 }

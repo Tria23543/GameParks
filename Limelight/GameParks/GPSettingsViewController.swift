@@ -2,64 +2,106 @@
 //  GPSettingsViewController.swift
 //  GameParks
 //
-//  Settings in the approved design: stream presets, the Stream
-//  section (resolution, bitrate, codec — Auto, never forced — frame
-//  rate), the "Why Auto?" explainer, Controls, and Hosts.
+//  The design's Settings: stream presets, the stream knobs, the
+//  controls, and the hosts list. Every value lives in the engine's
+//  own settings store (DataManager), because that is what the
+//  stream configuration is built from — GPSettingsStore writes
+//  through it, preserving the fields GameParks doesn't manage.
+//  The three design toggles that have no engine setting behind
+//  them (Video filters, Microphone, Anti-deadzone) persist as
+//  GameParks preferences, as they did in earlier versions.
 //
 
 import UIKit
+import GameController
+
+enum GPSettingsStore {
+    static func current() -> TemporarySettings? {
+        return DataManager().getSettings()
+    }
+
+    static func codecPref(of settings: TemporarySettings) -> UInt32 {
+        return (settings.value(forKey: "preferredCodec") as? NSNumber)?.uint32Value ?? 0
+    }
+
+    static func codecName(_ pref: UInt32) -> String {
+        switch pref {
+        case 1: return "H.264"
+        case 2: return "H.265"
+        case 3: return "AV1"
+        default: return "Auto"
+        }
+    }
+
+    static func save(width: Int? = nil, height: Int? = nil, fps: Int? = nil,
+                     bitrateKbps: Int? = nil, codec: UInt32? = nil,
+                     audioChannels: Int? = nil, onscreenControls: Int? = nil,
+                     statsOverlay: Bool? = nil) {
+        guard let cur = current() else { return }
+        DataManager().saveSettings(
+            withBitrate: bitrateKbps ?? cur.bitrate?.intValue ?? 20000,
+            framerate: fps ?? cur.framerate?.intValue ?? 60,
+            height: height ?? cur.height?.intValue ?? 1080,
+            width: width ?? cur.width?.intValue ?? 1920,
+            audioConfig: audioChannels ?? cur.audioConfig?.intValue ?? 2,
+            onscreenControls: onscreenControls ?? cur.onscreenControls?.intValue ?? 2,
+            optimizeGames: cur.optimizeGames,
+            multiController: cur.multiController,
+            swapABXYButtons: cur.swapABXYButtons,
+            audioOnPC: cur.playAudioOnPC,
+            preferredCodec: codec ?? codecPref(of: cur),
+            useFramePacing: cur.useFramePacing,
+            enableHdr: cur.enableHdr,
+            btMouseSupport: cur.btMouseSupport,
+            absoluteTouchMode: cur.absoluteTouchMode,
+            statsOverlay: statsOverlay ?? cur.statsOverlay)
+    }
+
+    struct Preset {
+        let title: String
+        let detail: String
+        let width: Int
+        let height: Int
+        let fps: Int
+        let bitrateKbps: Int
+    }
+
+    static let presets: [Preset] = [
+        Preset(title: "Home Wi-Fi", detail: "1080p · 60 fps · 20 Mb/s · Auto codec",
+               width: 1920, height: 1080, fps: 60, bitrateKbps: 20000),
+        Preset(title: "Mobile data saver", detail: "720p · 30 fps · 8 Mb/s",
+               width: 1280, height: 720, fps: 30, bitrateKbps: 8000),
+        Preset(title: "Cloud — best quality", detail: "1080p HQ · 60 fps · 25 Mb/s",
+               width: 1920, height: 1080, fps: 60, bitrateKbps: 25000),
+    ]
+
+    static func activePresetIndex() -> Int? {
+        guard let cur = current() else { return nil }
+        for (index, preset) in presets.enumerated() {
+            if cur.width?.intValue == preset.width && cur.height?.intValue == preset.height
+                && cur.framerate?.intValue == preset.fps && cur.bitrate?.intValue == preset.bitrateKbps {
+                return index
+            }
+        }
+        return nil
+    }
+
+    static func applyPreset(_ index: Int) {
+        let preset = presets[index]
+        save(width: preset.width, height: preset.height, fps: preset.fps, bitrateKbps: preset.bitrateKbps)
+    }
+}
 
 final class GPSettingsViewController: GPBaseViewController {
-    private let stack = UIStackView()
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-    }
-
-    private struct StreamState {
-        var width = 1920
-        var height = 1080
-        var fps = 60
-        var bitrateKbps = 20000
-        var codec: UInt32 = 0
-        var statsOverlay = true
-        var audioChannels = 2
-        var onscreenControls = 2
-    }
-    private var state = StreamState()
-
-    private let presets: [(name: String, detail: String, width: Int, height: Int, fps: Int, bitrate: Int)] = [
-        ("Home Wi-Fi", "1080p · 60 fps · 20 Mb/s · Auto codec", 1920, 1080, 60, 20000),
-        ("Mobile data saver", "720p · 30 fps · 8 Mb/s", 1280, 720, 30, 8000),
-        ("Cloud — best quality", "1080p HQ · 60 fps · 25 Mb/s", 1920, 1080, 60, 25000),
-    ]
+    private let dynamicStack = UIStackView()
 
     override func viewDidLoad() {
         super.viewDidLoad()
-
-        let scrollView = UIScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scrollView)
-
-        stack.axis = .vertical
-        stack.spacing = 12
-        stack.isLayoutMarginsRelativeArrangement = true
-        stack.layoutMargins = UIEdgeInsets(top: 18, left: 20, bottom: 28, right: 20)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
-        ])
-
-        NotificationCenter.default.addObserver(self, selector: #selector(rebuild), name: .gpHostsChanged, object: nil)
+        dynamicStack.axis = .vertical
+        dynamicStack.spacing = 16
+        contentStack.addArrangedSubview(dynamicStack)
+        NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
+                                               name: GPHostsChangedNotification, object: nil)
         rebuild()
     }
 
@@ -68,395 +110,356 @@ final class GPSettingsViewController: GPBaseViewController {
         rebuild()
     }
 
-    private func loadState() {
-        // Start from defaults every load: if the stored settings are
-        // ever unavailable, the screen must not render (or re-save)
-        // stale values from a previous load.
-        state = StreamState()
-        let engine = GPEngine.shared
-        if let settings = engine.currentSettings() {
-            state.width = settings.width?.intValue ?? 1920
-            state.height = settings.height?.intValue ?? 1080
-            state.fps = settings.framerate?.intValue ?? 60
-            state.bitrateKbps = settings.bitrate?.intValue ?? 20000
-            state.statsOverlay = settings.statsOverlay
-            state.audioChannels = settings.audioConfig?.intValue ?? 2
-            state.onscreenControls = settings.onscreenControls?.intValue ?? 2
-        }
-        // Clamp: a corrupt or legacy stored preference must not trap
-        // the UInt32 conversion and crash Settings on load.
-        state.codec = UInt32(max(0, min(3, engine.currentCodecPref())))
+    @objc private func stateChanged() {
+        rebuild()
     }
 
-    private func persist() {
-        GPEngine.shared.saveStreamSettings(width: state.width, height: state.height, fps: state.fps,
-                                           bitrateKbps: state.bitrateKbps, codec: state.codec,
-                                           statsOverlay: state.statsOverlay, audioChannels: state.audioChannels,
-                                           onscreenControls: state.onscreenControls)
-    }
-
-    @objc private func rebuild() {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.rebuild() }
-            return
+    private func rebuild() {
+        // The header carries the pairing state, so rebuild it too:
+        // it is the scaffold's first arranged view.
+        if let first = contentStack.arrangedSubviews.first, first !== dynamicStack {
+            first.removeFromSuperview()
         }
-        guard isViewLoaded else { return }
-        loadState()
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let engine = GPEngine.shared
-        let host = engine.selectedHost
+        dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        // Header
-        let header = UIStackView()
-        header.axis = .vertical
-        header.spacing = 3
-        header.addArrangedSubview(GPLabel("Settings", font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink))
-        let headerSubtitleText: String
-        if let host = host {
-            headerSubtitleText = host.pairState == .paired ? "GameParks · paired to \(host.name)" : "GameParks · \(host.name) is not paired yet"
-        } else {
-            headerSubtitleText = "GameParks · no PC paired yet"
-        }
-        header.addArrangedSubview(GPLabel(headerSubtitleText,
-                                          font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut, lines: 2))
-        stack.addArrangedSubview(header)
+        let session = GPSessionController.shared
+        let host = session.selectedHost ?? session.hosts.first
+        let subtitle = host != nil && host!.pairState == .paired
+            ? "GameParks · paired to \(host!.name ?? "your PC")"
+            : "GameParks"
+        contentStack.insertArrangedSubview(makeHeader(title: "Settings", subtitle: subtitle), at: 0)
 
         // Stream presets
-        stack.addArrangedSubview(sectionTitle("Stream presets"))
-        for (index, preset) in presets.enumerated() {
-            stack.addArrangedSubview(makePresetCard(index: index, preset: preset))
+        dynamicStack.addArrangedSubview(gpSectionHeader("Stream presets"))
+        let activePreset = GPSettingsStore.activePresetIndex()
+        for (index, preset) in GPSettingsStore.presets.enumerated() {
+            let row = GPRow(showsChevron: false)
+            row.titleLabel.text = preset.title
+            row.subtitle = preset.detail
+            if index == activePreset {
+                row.valueLabel.text = "Active"
+                row.valueLabel.textColor = GPColor.accent
+            }
+            row.tag = index
+            row.addTarget(self, action: #selector(presetTapped(_:)), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(row)
         }
 
-        // Stream
-        stack.addArrangedSubview(sectionTitle("Stream"))
-        let resolutionRow = GPRow(title: "Resolution", subtitle: resolutionSubtitle(), value: resolutionName())
-        resolutionRow.addTarget(self, action: #selector(resolutionTapped), for: .touchUpInside)
-        stack.addArrangedSubview(resolutionRow)
-
-        let bitrateRow = GPRow(title: "Bitrate", subtitle: "Higher = sharper picture", value: bitrateText())
-        bitrateRow.addTarget(self, action: #selector(bitrateTapped), for: .touchUpInside)
-        stack.addArrangedSubview(bitrateRow)
-
-        let codecRow = GPRow(title: "Codec", subtitle: "Auto recommended", value: codecName())
-        codecRow.addTarget(self, action: #selector(codecTapped), for: .touchUpInside)
-        stack.addArrangedSubview(codecRow)
-
-        let fpsRow = GPRow(title: "Frame rate", subtitle: nil, value: "\(state.fps) fps")
-        fpsRow.addTarget(self, action: #selector(fpsTapped), for: .touchUpInside)
-        stack.addArrangedSubview(fpsRow)
-
-        stack.addArrangedSubview(makeWhyAutoCard())
-
-        let filtersRow = GPRow(title: "Video filters", subtitle: "Sharpen · colour boost")
-        filtersRow.showsToggle = true
-        filtersRow.toggle.isOn = UserDefaults.standard.bool(forKey: "GPVideoFilters")
-        filtersRow.toggle.addTarget(self, action: #selector(filtersToggled(_:)), for: .valueChanged)
-        stack.addArrangedSubview(filtersRow)
-
-        let micRow = GPRow(title: "Microphone", subtitle: "Voice chat passthrough")
-        micRow.showsToggle = true
-        micRow.toggle.isOn = UserDefaults.standard.bool(forKey: "GPMicrophone")
-        micRow.toggle.addTarget(self, action: #selector(micToggled(_:)), for: .valueChanged)
-        stack.addArrangedSubview(micRow)
-
-        let surroundRow = GPRow(title: "Surround audio", subtitle: "Surround passthrough", value: surroundName())
-        surroundRow.addTarget(self, action: #selector(surroundTapped), for: .touchUpInside)
-        stack.addArrangedSubview(surroundRow)
+        // Stream summary rows → the detail screen
+        dynamicStack.addArrangedSubview(gpSectionHeader("Stream"))
+        let cur = GPSettingsStore.current()
+        let resolutionText = "\(cur?.width?.intValue ?? 1920)×\(cur?.height?.intValue ?? 1080)"
+        let rows: [(String, String?, String)] = [
+            ("Resolution", cur?.height?.intValue == 1080 ? "1080p HQ — your settled pick" : nil,
+             resolutionText.replacingOccurrences(of: "×", with: "×")),
+            ("Bitrate", "Higher = sharper picture", gpFormatBitrate(cur?.bitrate?.intValue ?? 20000)),
+            ("Codec", "Auto recommended", GPSettingsStore.codecName(cur != nil ? GPSettingsStore.codecPref(of: cur!) : 0)),
+            ("Frame rate", nil, "\(cur?.framerate?.intValue ?? 60) fps"),
+        ]
+        for (title, subtitle, value) in rows {
+            let row = GPRow()
+            row.titleLabel.text = title
+            row.subtitle = subtitle
+            row.valueLabel.text = value
+            row.addTarget(self, action: #selector(streamSettingsTapped), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(row)
+        }
 
         // Controls
-        stack.addArrangedSubview(sectionTitle("Controls"))
-        let controllerRow = GPRow(title: "Bluetooth controller",
-                                  subtitle: engine.bluetoothControllerConnected ? "Connected · Xbox layout" : "Not connected — pair it in iOS Settings",
-                                  value: engine.bluetoothControllerConnected ? "Paired" : "")
-        controllerRow.showsChevron = false // Status only — nothing to open.
-        stack.addArrangedSubview(controllerRow)
+        dynamicStack.addArrangedSubview(gpSectionHeader("Controls"))
+        let controllerRow = GPRow(showsChevron: false)
+        controllerRow.titleLabel.text = "Bluetooth controller"
+        let controllerConnected = !GCController.controllers().isEmpty
+        controllerRow.subtitle = controllerConnected ? "Connected" : "Connect one to play with a gamepad"
+        controllerRow.valueLabel.text = controllerConnected ? "Paired" : "Not connected"
+        dynamicStack.addArrangedSubview(controllerRow)
 
-        let oscRow = GPRow(title: "On-screen controls", subtitle: "Touch sticks & buttons", value: oscName())
-        oscRow.addTarget(self, action: #selector(oscTapped), for: .touchUpInside)
-        stack.addArrangedSubview(oscRow)
+        let oscRow = GPSwitchRow()
+        oscRow.titleLabel.text = "On-screen controls"
+        oscRow.subtitle = "Touch sticks & buttons"
+        oscRow.isOn = (cur?.onscreenControls?.intValue ?? 0) != 0
+        oscRow.onToggle = { isOn in GPSettingsStore.save(onscreenControls: isOn ? 2 : 0) }
+        dynamicStack.addArrangedSubview(oscRow)
 
-        let deadzoneRow = GPRow(title: "Anti-deadzone", subtitle: "Fixes loose-stick drift")
-        deadzoneRow.showsToggle = true
-        deadzoneRow.toggle.isOn = UserDefaults.standard.bool(forKey: "GPAntiDeadzone")
-        deadzoneRow.toggle.addTarget(self, action: #selector(deadzoneToggled(_:)), for: .valueChanged)
-        stack.addArrangedSubview(deadzoneRow)
+        let deadzoneRow = GPSwitchRow()
+        deadzoneRow.titleLabel.text = "Anti-deadzone"
+        deadzoneRow.subtitle = "Fixes loose-stick drift"
+        deadzoneRow.isOn = UserDefaults.standard.bool(forKey: "GPAntiDeadzone")
+        deadzoneRow.onToggle = { isOn in UserDefaults.standard.set(isOn, forKey: "GPAntiDeadzone") }
+        dynamicStack.addArrangedSubview(deadzoneRow)
 
-        let overlayRow = GPRow(title: "Stats overlay", subtitle: "Ping · fps · bitrate in-game")
-        overlayRow.showsToggle = true
-        overlayRow.toggle.isOn = state.statsOverlay
-        overlayRow.toggle.addTarget(self, action: #selector(overlayToggled(_:)), for: .valueChanged)
-        stack.addArrangedSubview(overlayRow)
+        let statsRow = GPSwitchRow()
+        statsRow.titleLabel.text = "Stats overlay"
+        statsRow.subtitle = "Ping · fps · bitrate in-game"
+        statsRow.isOn = cur?.statsOverlay ?? true
+        statsRow.onToggle = { isOn in GPSettingsStore.save(statsOverlay: isOn) }
+        dynamicStack.addArrangedSubview(statsRow)
 
         // Hosts
-        stack.addArrangedSubview(sectionTitle("Hosts"))
-        if let host = host {
-            let hostSubtitle: String
-            // Bind the ping ONCE: samples update asynchronously, and
-            // the old code evaluated ping(for:) twice and force-
-            // unwrapped the second result — a crash if they cleared
-            // in between.
-            let ping = engine.ping(for: host)
-            switch (host.state, host.pairState) {
+        dynamicStack.addArrangedSubview(gpSectionHeader("Hosts"))
+        for knownHost in session.hosts {
+            let row = GPRow()
+            row.titleLabel.text = knownHost.name
+            let ping = session.lastPingMs(for: knownHost)
+            switch (knownHost.state, knownHost.pairState) {
             case (.online, .paired):
-                hostSubtitle = "Paired · Sunshine\(ping.map { " · \($0) ms" } ?? "")"
+                row.subtitle = "Paired · Sunshine" + (ping >= 0 ? " · \(ping) ms" : "")
             case (.online, _):
-                hostSubtitle = "Online · not paired"
+                row.subtitle = "Online · not paired"
             case (.offline, _):
-                hostSubtitle = "Asleep · tap to wake"
+                row.subtitle = "Offline"
             default:
-                hostSubtitle = "Searching…"
+                row.subtitle = "Connecting…"
             }
-            let hostRow = GPRow(title: host.name,
-                                subtitle: hostSubtitle,
-                                value: "Manage")
-            hostRow.addTarget(self, action: #selector(manageHostTapped), for: .touchUpInside)
-            stack.addArrangedSubview(hostRow)
+            row.valueLabel.text = "Manage"
+            row.accessibilityIdentifier = knownHost.uuid
+            row.addTarget(self, action: #selector(hostRowTapped(_:)), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(row)
         }
-        let cloudRow = GPRow(title: "Cloud PC", subtitle: "Add later — same app, same library", value: "Add")
+
+        let addRow = GPRow()
+        addRow.titleLabel.text = "Add a PC by address"
+        addRow.subtitle = "If yours doesn't appear by itself"
+        addRow.addTarget(self, action: #selector(addHostTapped), for: .touchUpInside)
+        dynamicStack.addArrangedSubview(addRow)
+
+        let cloudRow = GPRow(showsChevron: false)
+        cloudRow.titleLabel.text = "Cloud PC"
+        cloudRow.subtitle = "Add later — same app, same library"
+        cloudRow.valueLabel.text = "Add"
         cloudRow.addTarget(self, action: #selector(cloudTapped), for: .touchUpInside)
-        stack.addArrangedSubview(cloudRow)
-
-        let addRow = GPRow(title: "Add a PC by address", subtitle: "If your PC does not appear automatically")
-        addRow.addTarget(self, action: #selector(addByAddressTapped), for: .touchUpInside)
-        stack.addArrangedSubview(addRow)
-    }
-
-    private func sectionTitle(_ text: String) -> UIView {
-        let label = GPLabel(text, font: GPTheme.display(16, weight: .bold), color: GPTheme.ink)
-        let container = UIView()
-        label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-            label.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-        ])
-        return container
-    }
-
-    private func makePresetCard(index: Int, preset: (name: String, detail: String, width: Int, height: Int, fps: Int, bitrate: Int)) -> UIView {
-        var active = state.width == preset.width && state.height == preset.height && state.fps == preset.fps && state.bitrateKbps == preset.bitrate
-        if index == 0 {
-            // The Home Wi-Fi preset's detail promises "Auto codec":
-            // it is only active when the codec really is Auto.
-            active = active && state.codec == 0
-        }
-        let card = UIControl()
-        card.tag = index
-        card.backgroundColor = GPTheme.panel
-        card.round(16)
-        card.layer.borderWidth = active ? 1.5 : 0
-        card.layer.borderColor = GPTheme.accent.cgColor
-        card.addTarget(self, action: #selector(presetTapped(_:)), for: .touchUpInside)
-
-        let nameLabel = GPLabel(preset.name, font: GPTheme.body(15, weight: .bold), color: GPTheme.ink)
-        let detailLabel = GPLabel(preset.detail, font: GPTheme.body(12.5, weight: .semibold), color: GPTheme.mut)
-        let textStack = UIStackView(arrangedSubviews: [nameLabel, detailLabel])
-        textStack.axis = .vertical
-        textStack.spacing = 3
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(textStack)
-
-        let activeLabel = GPLabel(active ? "Active" : "", font: GPTheme.body(12, weight: .extrabold), color: GPTheme.accent)
-        activeLabel.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(activeLabel)
-
-        NSLayoutConstraint.activate([
-            textStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            textStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 13),
-            textStack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -13),
-            activeLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            activeLabel.centerYAnchor.constraint(equalTo: card.centerYAnchor),
-        ])
-        return card
-    }
-
-    private func makeWhyAutoCard() -> UIView {
-        let card = UIView()
-        card.backgroundColor = GPTheme.accentSoft
-        card.round(16)
-        let title = GPLabel("Why Auto?", font: GPTheme.body(14, weight: .extrabold), color: GPTheme.accent)
-        let body = GPLabel("Forcing H.265 made streams hang on XStreaming. Auto picks the best codec your phone and PC agree on — every time.",
-                           font: GPTheme.body(13, weight: .semibold), color: GPTheme.ink, lines: 0)
-        let stack = UIStackView(arrangedSubviews: [title, body])
-        stack.axis = .vertical
-        stack.spacing = 5
-        stack.isLayoutMarginsRelativeArrangement = true
-        stack.layoutMargins = UIEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: card.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-        ])
-        return card
-    }
-
-    // MARK: - Value helpers
-
-    private func resolutionName() -> String {
-        switch state.height {
-        case 720: return "720p"
-        case 1080: return "1080p"
-        case 2160: return "4K"
-        default: return "\(state.height)p"
-        }
-    }
-
-    private func resolutionSubtitle() -> String {
-        if state.width == 1920 && state.height == 1080 {
-            return "1080p HQ — your settled pick"
-        }
-        return "Stream resolution"
-    }
-
-    private func codecName() -> String {
-        switch state.codec {
-        case 1: return "H.264"
-        case 2: return "H.265"
-        case 3: return "AV1"
-        default: return "Auto"
-        }
-    }
-
-    private func oscName() -> String {
-        switch state.onscreenControls {
-        case 0: return "Off"
-        case 1: return "On"
-        default: return "Auto"
-        }
-    }
-
-    /// "20 Mb/s" for whole values; a stored non-round bitrate (the
-    /// legacy front-end's slider could save one) shows one decimal
-    /// instead of being silently truncated by integer division.
-    private func bitrateText() -> String {
-        if state.bitrateKbps % 1000 == 0 {
-            return "\(state.bitrateKbps / 1000) Mb/s"
-        }
-        return String(format: "%.1f Mb/s", locale: Locale(identifier: "en_US_POSIX"), Double(state.bitrateKbps) / 1000.0)
-    }
-
-    private func surroundName() -> String {
-        switch state.audioChannels {
-        case ..<6: return "Stereo"
-        case ..<8: return "5.1"
-        default: return "7.1"
-        }
+        dynamicStack.addArrangedSubview(cloudRow)
     }
 
     // MARK: - Actions
 
-    @objc private func presetTapped(_ sender: UIControl) {
-        guard presets.indices.contains(sender.tag) else { return }
-        let preset = presets[sender.tag]
-        state.width = preset.width
-        state.height = preset.height
-        state.fps = preset.fps
-        state.bitrateKbps = preset.bitrate
-        if sender.tag == 0 {
-            state.codec = 0 // Home Wi-Fi preset is the Auto-codec one
-        }
-        persist()
+    @objc private func presetTapped(_ sender: GPRow) {
+        GPSettingsStore.applyPreset(sender.tag)
         rebuild()
     }
 
-    private func pickSheet(title: String, options: [(label: String, apply: () -> Void)]) {
-        let sheet = UIAlertController(title: title, message: nil, preferredStyle: .actionSheet)
-        for option in options {
-            sheet.addAction(UIAlertAction(title: option.label, style: .default) { _ in
-                option.apply()
-                self.persist()
-                self.rebuild()
-            })
-        }
-        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        if let popover = sheet.popoverPresentationController {
-            popover.sourceView = view
-            popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
-        }
-        present(sheet, animated: true)
+    @objc private func streamSettingsTapped() {
+        navigationController?.pushViewController(GPStreamSettingsViewController(), animated: true)
     }
 
-    @objc private func resolutionTapped() {
-        pickSheet(title: "Resolution", options: [
-            ("720p", { self.state.width = 1280; self.state.height = 720 }),
-            ("1080p", { self.state.width = 1920; self.state.height = 1080 }),
-            ("4K", { self.state.width = 3840; self.state.height = 2160 }),
-        ])
-    }
-
-    @objc private func bitrateTapped() {
-        let values = [5, 10, 15, 20, 25, 30, 40, 60, 80, 100]
-        pickSheet(title: "Bitrate", options: values.map { value in
-            ("\(value) Mb/s", { self.state.bitrateKbps = value * 1000 })
-        })
-    }
-
-    @objc private func codecTapped() {
-        pickSheet(title: "Codec", options: [
-            ("Auto (recommended)", { self.state.codec = 0 }),
-            ("H.265", { self.state.codec = 2 }),
-            ("H.264", { self.state.codec = 1 }),
-            ("AV1", { self.state.codec = 3 }),
-        ])
-    }
-
-    @objc private func fpsTapped() {
-        pickSheet(title: "Frame rate", options: [
-            ("30 fps", { self.state.fps = 30 }),
-            ("60 fps", { self.state.fps = 60 }),
-            ("120 fps", { self.state.fps = 120 }),
-        ])
-    }
-
-    @objc private func surroundTapped() {
-        pickSheet(title: "Surround audio", options: [
-            ("Stereo", { self.state.audioChannels = 2 }),
-            ("5.1 surround", { self.state.audioChannels = 6 }),
-            ("7.1 surround", { self.state.audioChannels = 8 }),
-        ])
-    }
-
-    @objc private func oscTapped() {
-        pickSheet(title: "On-screen controls", options: [
-            ("Auto — show when no controller is connected", { self.state.onscreenControls = 2 }),
-            ("On", { self.state.onscreenControls = 1 }),
-            ("Off", { self.state.onscreenControls = 0 }),
-        ])
-    }
-
-    @objc private func overlayToggled(_ sender: UISwitch) {
-        state.statsOverlay = sender.isOn
-        persist()
-    }
-
-    @objc private func deadzoneToggled(_ sender: UISwitch) {
-        UserDefaults.standard.set(sender.isOn, forKey: "GPAntiDeadzone")
-    }
-
-    @objc private func filtersToggled(_ sender: UISwitch) {
-        UserDefaults.standard.set(sender.isOn, forKey: "GPVideoFilters")
-    }
-
-    @objc private func micToggled(_ sender: UISwitch) {
-        UserDefaults.standard.set(sender.isOn, forKey: "GPMicrophone")
-    }
-
-    @objc private func manageHostTapped() {
-        guard let host = GPEngine.shared.selectedHost else { return }
+    @objc private func hostRowTapped(_ sender: GPRow) {
+        guard let uuid = sender.accessibilityIdentifier,
+              let host = GPSessionController.shared.hosts.first(where: { $0.uuid == uuid }) else { return }
+        GPSessionController.shared.selectHost(host)
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
     }
 
-    @objc private func cloudTapped() {
-        showMessage(title: "Cloud PC",
-                    message: "When your cloud PC is ready, add it here and it joins as a second host — same app, same library, same posters, same settings.")
-    }
-
-    @objc private func addByAddressTapped() {
+    @objc private func addHostTapped() {
         presentAddByAddress()
     }
+
+    @objc private func cloudTapped() {
+        presentAlert(title: "Cloud PC",
+                     message: "When a cloud PC is ready, it joins here as a second host — same app, same library, same settings. There's nothing to set up yet.")
+    }
+}
+
+// MARK: - Stream settings detail
+
+final class GPStreamSettingsViewController: GPBaseViewController {
+    private let dynamicStack = UIStackView()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        contentStack.addArrangedSubview(makeHeader(title: "Stream settings",
+                                                   subtitle: "Picture & sound", showsBack: true))
+        dynamicStack.axis = .vertical
+        dynamicStack.spacing = 16
+        contentStack.addArrangedSubview(dynamicStack)
+        rebuild()
+    }
+
+    private func rebuild() {
+        dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let cur = GPSettingsStore.current()
+
+        dynamicStack.addArrangedSubview(gpSectionHeader("Presets"))
+        let activePreset = GPSettingsStore.activePresetIndex()
+        for (index, preset) in GPSettingsStore.presets.enumerated() {
+            let row = GPRow(showsChevron: false)
+            row.titleLabel.text = preset.title
+            row.subtitle = preset.detail
+            if index == activePreset {
+                row.valueLabel.text = "Active"
+                row.valueLabel.textColor = GPColor.accent
+            }
+            row.tag = index
+            row.addTarget(self, action: #selector(presetTapped(_:)), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(row)
+        }
+
+        dynamicStack.addArrangedSubview(gpSectionHeader("Fine tuning"))
+
+        let resolution = gpSegmented(items: ["720p", "1080p", "4K"])
+        resolution.selectedSegmentIndex = (cur?.height?.intValue ?? 1080) >= 2160 ? 2
+            : ((cur?.height?.intValue ?? 1080) >= 1080 ? 1 : 0)
+        resolution.addTarget(self, action: #selector(resolutionChanged(_:)), for: .valueChanged)
+        dynamicStack.addArrangedSubview(controlCard(title: "Resolution", control: resolution))
+
+        let frameRate = gpSegmented(items: ["30", "60", "120"])
+        frameRate.selectedSegmentIndex = [30, 60, 120].firstIndex(of: cur?.framerate?.intValue ?? 60) ?? 1
+        frameRate.addTarget(self, action: #selector(frameRateChanged(_:)), for: .valueChanged)
+        dynamicStack.addArrangedSubview(controlCard(title: "Frame rate", control: frameRate))
+
+        let codec = gpSegmented(items: ["Auto", "H.265", "H.264"])
+        let codecPref = cur != nil ? GPSettingsStore.codecPref(of: cur!) : 0
+        codec.selectedSegmentIndex = codecPref == 2 ? 1 : (codecPref == 1 ? 2 : 0)
+        codec.addTarget(self, action: #selector(codecChanged(_:)), for: .valueChanged)
+        dynamicStack.addArrangedSubview(controlCard(title: "Codec", control: codec))
+
+        // Bitrate stepper card
+        let bitrateCard = UIView()
+        bitrateCard.backgroundColor = GPColor.panel
+        bitrateCard.layer.cornerRadius = 16
+        let bitrateValue = gpLabel("\(Int((Double(cur?.bitrate?.intValue ?? 20000) / 1000.0).rounded())) Mb/s",
+                                   font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+        bitrateValue.tag = 77
+        let stepper = UIStepper()
+        stepper.minimumValue = 5
+        stepper.maximumValue = 40
+        stepper.stepValue = 1
+        stepper.value = Double(cur?.bitrate?.intValue ?? 20000) / 1000.0
+        stepper.tintColor = GPColor.accent
+        stepper.addTarget(self, action: #selector(bitrateChanged(_:)), for: .valueChanged)
+        let bitrateText = UIStackView(arrangedSubviews: [
+            gpLabel("Bitrate", font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1),
+            gpLabel("Higher = sharper picture", font: GPFont.body(13), color: GPColor.textSecondary, lines: 1),
+        ])
+        bitrateText.axis = .vertical
+        bitrateText.spacing = 2
+        let bitrateRow = UIStackView(arrangedSubviews: [bitrateText, bitrateValue, stepper])
+        bitrateRow.axis = .horizontal
+        bitrateRow.alignment = .center
+        bitrateRow.spacing = 10
+        bitrateRow.translatesAutoresizingMaskIntoConstraints = false
+        bitrateCard.addSubview(bitrateRow)
+        NSLayoutConstraint.activate([
+            bitrateRow.topAnchor.constraint(equalTo: bitrateCard.topAnchor, constant: 12),
+            bitrateRow.bottomAnchor.constraint(equalTo: bitrateCard.bottomAnchor, constant: -12),
+            bitrateRow.leadingAnchor.constraint(equalTo: bitrateCard.leadingAnchor, constant: 16),
+            bitrateRow.trailingAnchor.constraint(equalTo: bitrateCard.trailingAnchor, constant: -16),
+        ])
+        dynamicStack.addArrangedSubview(bitrateCard)
+
+        let filtersRow = GPSwitchRow()
+        filtersRow.titleLabel.text = "Video filters"
+        filtersRow.subtitle = "Sharpen · colour boost"
+        filtersRow.isOn = UserDefaults.standard.bool(forKey: "GPVideoFilters")
+        filtersRow.onToggle = { isOn in UserDefaults.standard.set(isOn, forKey: "GPVideoFilters") }
+        dynamicStack.addArrangedSubview(filtersRow)
+
+        let micRow = GPSwitchRow()
+        micRow.titleLabel.text = "Microphone"
+        micRow.subtitle = "Voice chat passthrough"
+        micRow.isOn = UserDefaults.standard.bool(forKey: "GPMicrophone")
+        micRow.onToggle = { isOn in UserDefaults.standard.set(isOn, forKey: "GPMicrophone") }
+        dynamicStack.addArrangedSubview(micRow)
+
+        let surround = gpSegmented(items: ["Stereo", "5.1", "7.1"])
+        surround.selectedSegmentIndex = (cur?.audioConfig?.intValue ?? 2) >= 8 ? 2
+            : ((cur?.audioConfig?.intValue ?? 2) >= 6 ? 1 : 0)
+        surround.addTarget(self, action: #selector(surroundChanged(_:)), for: .valueChanged)
+        dynamicStack.addArrangedSubview(controlCard(title: "Surround audio", control: surround))
+
+        // Why Auto — the design's own explanation, verbatim.
+        let whyCard = UIView()
+        whyCard.backgroundColor = GPColor.panel
+        whyCard.layer.cornerRadius = 16
+        let whyStack = UIStackView(arrangedSubviews: [
+            gpLabel("Why Auto?", font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1),
+            gpLabel("Forcing H.265 made streams hang on XStreaming. Auto picks the best codec your phone and PC agree on — every time.",
+                    font: GPFont.body(13), color: GPColor.textSecondary, lines: 0),
+        ])
+        whyStack.axis = .vertical
+        whyStack.spacing = 4
+        whyStack.translatesAutoresizingMaskIntoConstraints = false
+        whyCard.addSubview(whyStack)
+        NSLayoutConstraint.activate([
+            whyStack.topAnchor.constraint(equalTo: whyCard.topAnchor, constant: 14),
+            whyStack.bottomAnchor.constraint(equalTo: whyCard.bottomAnchor, constant: -14),
+            whyStack.leadingAnchor.constraint(equalTo: whyCard.leadingAnchor, constant: 16),
+            whyStack.trailingAnchor.constraint(equalTo: whyCard.trailingAnchor, constant: -16),
+        ])
+        dynamicStack.addArrangedSubview(whyCard)
+    }
+
+    private func controlCard(title: String, control: UIView) -> UIView {
+        let card = UIView()
+        card.backgroundColor = GPColor.panel
+        card.layer.cornerRadius = 16
+        let stack = UIStackView(arrangedSubviews: [
+            gpLabel(title, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1),
+            control,
+        ])
+        stack.axis = .vertical
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+        ])
+        return card
+    }
+
+    // MARK: - Actions
+
+    @objc private func presetTapped(_ sender: GPRow) {
+        GPSettingsStore.applyPreset(sender.tag)
+        rebuild()
+    }
+
+    @objc private func resolutionChanged(_ sender: UISegmentedControl) {
+        switch sender.selectedSegmentIndex {
+        case 0: GPSettingsStore.save(width: 1280, height: 720)
+        case 2: GPSettingsStore.save(width: 3840, height: 2160)
+        default: GPSettingsStore.save(width: 1920, height: 1080)
+        }
+    }
+
+    @objc private func frameRateChanged(_ sender: UISegmentedControl) {
+        GPSettingsStore.save(fps: [30, 60, 120][sender.selectedSegmentIndex])
+    }
+
+    @objc private func codecChanged(_ sender: UISegmentedControl) {
+        let prefs: [UInt32] = [0, 2, 1] // Auto, H.265 (HEVC), H.264
+        GPSettingsStore.save(codec: prefs[sender.selectedSegmentIndex])
+    }
+
+    @objc private func bitrateChanged(_ sender: UIStepper) {
+        GPSettingsStore.save(bitrateKbps: Int(sender.value) * 1000)
+        if let card = sender.superview, let value = card.viewWithTag(77) as? UILabel {
+            value.text = "\(Int(sender.value)) Mb/s"
+        }
+    }
+
+    @objc private func surroundChanged(_ sender: UISegmentedControl) {
+        GPSettingsStore.save(audioChannels: [2, 6, 8][sender.selectedSegmentIndex])
+    }
+}
+
+/// "20 Mb/s" / "5.5 Mb/s" — whole numbers without a decimal.
+func gpFormatBitrate(_ kbps: Int) -> String {
+    let mbps = Double(kbps) / 1000.0
+    if mbps == mbps.rounded() {
+        return "\(Int(mbps)) Mb/s"
+    }
+    return String(format: "%.1f Mb/s", mbps)
+}
+
+func gpSegmented(items: [String]) -> UISegmentedControl {    let segmented = UISegmentedControl(items: items)
+    segmented.selectedSegmentTintColor = GPColor.accent
+    segmented.backgroundColor = GPColor.panelRaised
+    segmented.setTitleTextAttributes([.foregroundColor: GPColor.textPrimary,
+                                      .font: GPFont.body(13, weight: .semibold)], for: .normal)
+    segmented.setTitleTextAttributes([.foregroundColor: GPColor.onAccent,
+                                      .font: GPFont.body(13, weight: .bold)], for: .selected)
+    return segmented
 }

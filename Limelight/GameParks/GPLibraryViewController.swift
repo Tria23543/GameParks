@@ -2,319 +2,225 @@
 //  GPLibraryViewController.swift
 //  GameParks
 //
-//  Library in the approved design: searchable poster grid of the
-//  host's whole Sunshine app list, with filter chips —
-//  All · Big games · Classics · Favourites.
+//  The design's Library: the selected PC's full Sunshine app list
+//  — Steam games and her own installs side by side — searchable,
+//  with the All / Big games / Classics / Favourites chips. Every
+//  state (no PC, unpaired, load failed, no matches) is explained
+//  with a way forward.
 //
 
 import UIKit
 
 final class GPLibraryViewController: GPBaseViewController {
-    private let searchBar = UISearchBar()
-    private let chipsStack = UIStackView()
-    private let collectionView: UICollectionView = {
-        let layout = UICollectionViewFlowLayout()
-        layout.scrollDirection = .vertical
-        layout.minimumInteritemSpacing = 14
-        layout.minimumLineSpacing = 18
-        return UICollectionView(frame: .zero, collectionViewLayout: layout)
-    }()
-    private let emptyLabel = GPLabel("No games match — try another search.", font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut, lines: 0)
-    private let emptyButton = UIButton(type: .system)
-    private let headerTitle = GPLabel("Library", font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink)
-    private let headerSubtitle = GPLabel("", font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut)
-
-    private enum Filter: Int {
+    private enum Filter {
         case all, big, classics, favourites
     }
-    private var filter: Filter = .all
-    private var searchText: String = ""
-    private var allApps: [TemporaryApp] = []
-    private var visibleApps: [TemporaryApp] = []
-    private var chips: [GPChip] = []
-    private var lastReloadSignature: String?
-    private var searchDebounce: DispatchWorkItem?
-    private var emptyContainer: UIStackView?
 
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-    }
+    private let subtitleLabel = gpLabel(nil, font: GPFont.body(14), color: GPColor.textSecondary, lines: 1)
+    private let searchField = UITextField()
+    private var filter: Filter = .all
+    private var chips: [Filter: GPChipButton] = [:]
+    private let dynamicStack = UIStackView()
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        let headerStack = UIStackView(arrangedSubviews: [headerTitle, headerSubtitle])
-        headerStack.axis = .vertical
-        headerStack.spacing = 3
-        headerStack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(headerStack)
+        let header = UIStackView()
+        header.axis = .vertical
+        header.spacing = 4
+        header.addArrangedSubview(gpLabel("Library", font: GPFont.display(28, weight: .extrabold), color: GPColor.textPrimary, lines: 1))
+        header.addArrangedSubview(subtitleLabel)
+        contentStack.addArrangedSubview(header)
 
-        searchBar.placeholder = "Search your games"
-        searchBar.searchBarStyle = .minimal
-        searchBar.delegate = self
-        searchBar.tintColor = GPTheme.accent
-        searchBar.showsCancelButton = true
-        let field = searchBar.searchTextField
-        field.textColor = GPTheme.ink
-        field.backgroundColor = GPTheme.panel
-        field.font = GPTheme.body(14, weight: .semibold)
-        searchBar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(searchBar)
-
-        chipsStack.axis = .horizontal
-        chipsStack.spacing = 8
-        chipsStack.translatesAutoresizingMaskIntoConstraints = false
-        let chipTitles = ["All", "Big games", "Classics", "Favourites"]
-        for (index, title) in chipTitles.enumerated() {
-            let chip = GPChip(title: title)
-            chip.tag = index
-            chip.chipSelected = index == 0
-            chip.addTarget(self, action: #selector(chipTapped(_:)), for: .touchUpInside)
-            chips.append(chip)
-            chipsStack.addArrangedSubview(chip)
-        }
-        let chipsScroll = UIScrollView()
-        chipsScroll.showsHorizontalScrollIndicator = false
-        chipsScroll.translatesAutoresizingMaskIntoConstraints = false
-        chipsScroll.addSubview(chipsStack)
-        view.addSubview(chipsScroll)
-
-        collectionView.backgroundColor = .clear
-        collectionView.dataSource = self
-        collectionView.delegate = self
-        collectionView.keyboardDismissMode = .onDrag
-        collectionView.register(GPPosterCell.self, forCellWithReuseIdentifier: GPPosterCell.reuseID)
-        collectionView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(collectionView)
-
-        emptyLabel.textAlignment = .center
-        emptyButton.setTitleColor(GPTheme.accent, for: .normal)
-        emptyButton.titleLabel?.font = GPTheme.body(15, weight: .bold)
-        emptyButton.addTarget(self, action: #selector(emptyButtonTapped), for: .touchUpInside)
-        let emptyStack = UIStackView(arrangedSubviews: [emptyLabel, emptyButton])
-        emptyStack.axis = .vertical
-        emptyStack.spacing = 10
-        emptyStack.alignment = .center
-        emptyStack.isHidden = true
-        emptyStack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(emptyStack)
-        emptyContainer = emptyStack
-
+        // Search
+        let searchContainer = UIView()
+        searchContainer.backgroundColor = GPColor.panel
+        searchContainer.layer.cornerRadius = 14
+        searchField.attributedPlaceholder = NSAttributedString(
+            string: "Search your games",
+            attributes: [.foregroundColor: GPColor.textFaint])
+        searchField.textColor = GPColor.textPrimary
+        searchField.font = GPFont.body(15)
+        searchField.autocorrectionType = .no
+        searchField.autocapitalizationType = .none
+        searchField.returnKeyType = .search
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.addTarget(self, action: #selector(searchChanged), for: .editingChanged)
+        searchContainer.addSubview(searchField)
         NSLayoutConstraint.activate([
-            headerStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 14),
-            headerStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            headerStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-
-            searchBar.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 10),
-            searchBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            searchBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-
-            chipsScroll.topAnchor.constraint(equalTo: searchBar.bottomAnchor, constant: 6),
-            chipsScroll.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            chipsScroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            chipsScroll.heightAnchor.constraint(equalToConstant: 40),
-            chipsStack.topAnchor.constraint(equalTo: chipsScroll.contentLayoutGuide.topAnchor),
-            chipsStack.bottomAnchor.constraint(equalTo: chipsScroll.contentLayoutGuide.bottomAnchor),
-            chipsStack.leadingAnchor.constraint(equalTo: chipsScroll.contentLayoutGuide.leadingAnchor),
-            chipsStack.trailingAnchor.constraint(equalTo: chipsScroll.contentLayoutGuide.trailingAnchor),
-            chipsStack.heightAnchor.constraint(equalTo: chipsScroll.frameLayoutGuide.heightAnchor),
-
-            collectionView.topAnchor.constraint(equalTo: chipsScroll.bottomAnchor, constant: 12),
-            collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-
-            emptyStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            emptyStack.centerYAnchor.constraint(equalTo: collectionView.centerYAnchor),
-            emptyStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 30),
-            emptyStack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -30),
+            searchField.topAnchor.constraint(equalTo: searchContainer.topAnchor, constant: 12),
+            searchField.bottomAnchor.constraint(equalTo: searchContainer.bottomAnchor, constant: -12),
+            searchField.leadingAnchor.constraint(equalTo: searchContainer.leadingAnchor, constant: 14),
+            searchField.trailingAnchor.constraint(equalTo: searchContainer.trailingAnchor, constant: -14),
         ])
+        contentStack.addArrangedSubview(searchContainer)
 
-        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .gpHostsChanged, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .gpAppListChanged, object: nil)
-        reload()
+        // Filter chips
+        let chipRow = UIStackView()
+        chipRow.axis = .horizontal
+        chipRow.spacing = 8
+        for (value, title) in [(Filter.all, "All"), (Filter.big, "Big games"), (Filter.classics, "Classics"), (Filter.favourites, "Favourites")] {
+            let chip = GPChipButton(title: title)
+            chip.tag = filterTag(value)
+            chip.addTarget(self, action: #selector(chipTapped(_:)), for: .touchUpInside)
+            chips[value] = chip
+            chipRow.addArrangedSubview(chip)
+        }
+        chipRow.addArrangedSubview(UIView())
+        contentStack.addArrangedSubview(chipRow)
+
+        dynamicStack.axis = .vertical
+        dynamicStack.spacing = 10
+        contentStack.addArrangedSubview(dynamicStack)
+
+        NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
+                                               name: GPHostsChangedNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
+                                               name: GPAppListChangedNotification, object: nil)
+        refreshChips()
+        rebuild()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        reload()
+        rebuild()
     }
 
-    @objc private func reload() {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.reload() }
-            return
-        }
-        guard isViewLoaded else { return }
-        let engine = GPEngine.shared
-        let host = engine.selectedHost
-        let apps = host.map { engine.sortedApps(for: $0) } ?? []
-        // Skip the refilter/reload when nothing the grid renders has
-        // changed (notifications + viewWillAppear used to rerun the
-        // whole filter on every appearance and every ping).
-        let signature = [host?.uuid ?? "none", "\(host?.state.rawValue ?? -1)", "\(host?.pairState.rawValue ?? -1)",
-                         apps.map { $0.id ?? $0.name ?? "?" }.joined(separator: ",")].joined(separator: "|")
-        if signature == lastReloadSignature {
-            return
-        }
-        lastReloadSignature = signature
-        allApps = apps
-        if host == nil {
-            headerSubtitle.text = "No PC selected"
-        } else {
-            headerSubtitle.text = "\(allApps.count) \(allApps.count == 1 ? "game" : "games") · Steam + your own installs"
-        }
-        applyFilter()
+    @objc private func stateChanged() {
+        rebuild()
     }
 
-    private func applyFilter() {
-        // Hoisted out of the per-app closure: the host and the
-        // favourites set are the same for every app in the list.
-        let favourites = GPFavourites.shared.all()
-        let host = GPEngine.shared.selectedHost
-        visibleApps = allApps.filter { app in
-            let meta = GPGameMeta.meta(forAppName: app.name ?? "")
-            switch filter {
-            case .all:
-                break
-            case .big:
-                if meta.group != .big { return false }
-            case .classics:
-                if meta.group != .classic { return false }
-            case .favourites:
-                guard let host = host else { return false }
-                if !favourites.contains(GPStats.appKey(host: host, app: app)) { return false }
+    @objc private func searchChanged() {
+        rebuild()
+    }
+
+    private func filterTag(_ value: Filter) -> Int {
+        switch value {
+        case .all: return 0
+        case .big: return 1
+        case .classics: return 2
+        case .favourites: return 3
+        }
+    }
+
+    @objc private func chipTapped(_ sender: GPChipButton) {
+        switch sender.tag {
+        case 1: filter = .big
+        case 2: filter = .classics
+        case 3: filter = .favourites
+        default: filter = .all
+        }
+        refreshChips()
+        rebuild()
+    }
+
+    private func refreshChips() {
+        for (value, chip) in chips {
+            chip.chipSelected = (value == filter)
+        }
+    }
+
+    // MARK: - Rendering
+
+    private func rebuild() {
+        dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let session = GPSessionController.shared
+
+        guard let host = session.selectedHost ?? session.hosts.first else {
+            subtitleLabel.text = "No PC yet"
+            let message = GPMessageView()
+            message.configure(title: "No PC found yet",
+                              message: "Your games live on your PC. Once GameParks finds it on your network, they all appear here.",
+                              actionTitle: "Go to Home")
+            message.actionButton.addTarget(self, action: #selector(goHome), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(message)
+            return
+        }
+
+        let allApps = GPCatalog.sortedApps(for: host)
+        subtitleLabel.text = "\(allApps.count) games · Steam + your own installs"
+
+        if host.pairState != .paired {
+            let message = GPMessageView()
+            message.configure(title: "Pair with your PC to see its games",
+                              message: "Your library is read from Sunshine on the PC, and that needs the one-time pairing.",
+                              actionTitle: "Open PC page")
+            message.actionButton.addTarget(self, action: #selector(openHostPage), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(message)
+            return
+        }
+
+        if allApps.isEmpty {
+            let message = GPMessageView()
+            if let error = session.appListError(for: host) {
+                message.configure(title: "Couldn't load your games", message: error, actionTitle: "Try again")
+            } else {
+                message.configure(title: "No games found on this PC yet",
+                                  message: "Games appear here once they're in Sunshine's app list on the PC.",
+                                  actionTitle: "Check again")
             }
-            if !searchText.isEmpty {
-                return (app.name ?? "").localizedCaseInsensitiveContains(searchText)
-            }
-            return true
-        }
-        updateEmptyState()
-        collectionView.reloadData()
-    }
-
-    /// The empty state must say WHERE the user is stuck and offer the
-    /// way out — "try another search" was the only text for no-host,
-    /// unpaired and offline states too, which made Library a dead end.
-    private func updateEmptyState() {
-        guard visibleApps.isEmpty else {
-            emptyContainer?.isHidden = true
+            message.actionButton.addTarget(self, action: #selector(retryAppList), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(message)
             return
         }
-        let engine = GPEngine.shared
-        let host = engine.selectedHost
-        var showButton = false
-        if !searchText.isEmpty || filter != .all {
-            emptyLabel.text = "No games match — try another search."
-        } else if host == nil {
-            emptyLabel.text = "No PC found yet. Your games appear here once a PC is found on your network."
-            showButton = true
-        } else if host?.pairState != .paired {
-            emptyLabel.text = "This PC is not paired yet. Pair it from the Home tab — one PIN, entered once — and your games will appear here."
-            showButton = true
-        } else if host?.state != .online {
-            emptyLabel.text = "Your PC is asleep or offline. Wake it from the Home tab and your games will appear here."
-            showButton = true
-        } else {
-            emptyLabel.text = "No games found on this PC yet. Add your games in Sunshine on the PC — they appear here automatically."
+
+        var apps = allApps
+        switch filter {
+        case .all:
+            break
+        case .big:
+            apps = apps.filter { !GPCatalog.info(for: $0).isClassic }
+        case .classics:
+            apps = apps.filter { GPCatalog.info(for: $0).isClassic }
+        case .favourites:
+            apps = apps.filter { GPCatalog.isFavourite(host: host, app: $0) }
         }
-        emptyButton.setTitle("Go to Home", for: .normal)
-        emptyButton.isHidden = !showButton
-        emptyContainer?.isHidden = false
-    }
-
-    @objc private func emptyButtonTapped() {
-        tabBarController?.selectedIndex = 0
-    }
-
-    @objc private func chipTapped(_ sender: GPChip) {
-        filter = Filter(rawValue: sender.tag) ?? .all
-        chips.forEach { $0.chipSelected = $0.tag == sender.tag }
-        applyFilter()
-    }
-}
-
-extension GPLibraryViewController: UISearchBarDelegate {
-    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
-        self.searchText = searchText
-        // Debounced: refiltering the whole library on every keystroke
-        // made typing lag on large lists.
-        searchDebounce?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.applyFilter()
+        let query = (searchField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !query.isEmpty {
+            apps = apps.filter { ($0.name ?? "").lowercased().contains(query) }
         }
-        searchDebounce = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
-    }
 
-    func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
-        searchBar.resignFirstResponder()
-    }
-
-    func searchBarCancelButtonClicked(_ searchBar: UISearchBar) {
-        searchBar.text = ""
-        self.searchText = ""
-        applyFilter()
-        searchBar.resignFirstResponder()
-    }
-}
-
-extension GPLibraryViewController: UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDelegateFlowLayout {
-    func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
-        // Cell sizing belongs in the flow-layout delegate — mutating
-        // the layout from inside viewDidLayoutSubviews invalidated
-        // layout during a layout pass.
-        let columns: CGFloat = view.bounds.width > 500 ? 4 : 3
-        let spacing: CGFloat = 14
-        let width = (collectionView.bounds.width - spacing * (columns - 1)) / columns
-        // Poster (×1.42) + 7 spacing + two title lines + subtitle ≈ +56.
-        return CGSize(width: width, height: width * 1.42 + 56)
-    }
-
-    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        return visibleApps.count
-    }
-
-    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        guard visibleApps.indices.contains(indexPath.item),
-              let cell = collectionView.dequeueReusableCell(withReuseIdentifier: GPPosterCell.reuseID, for: indexPath) as? GPPosterCell else {
-            return UICollectionViewCell()
+        if apps.isEmpty {
+            dynamicStack.addArrangedSubview(gpLabel("No games match — try another search.",
+                                                    font: GPFont.body(14), color: GPColor.textSecondary, lines: 0))
+            return
         }
-        let app = visibleApps[indexPath.item]
-        let meta = GPGameMeta.meta(forAppName: app.name ?? "")
-        cell.configure(app: app, subtitle: meta.sourceTag, badge: nil)
-        return cell
-    }
 
-    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard visibleApps.indices.contains(indexPath.item) else { return }
-        let gameVC = GPGameViewController(app: visibleApps[indexPath.item])
-        navigationController?.pushViewController(gameVC, animated: true)
-    }
-}
-
-// MARK: - Favourites
-
-final class GPFavourites {
-    static let shared = GPFavourites()
-    private let key = "GPFavourites.appKeys"
-
-    func all() -> Set<String> {
-        return Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
-    }
-
-    func contains(_ appKey: String) -> Bool {
-        return all().contains(appKey)
-    }
-
-    func toggle(_ appKey: String) {
-        var set = all()
-        if set.contains(appKey) {
-            set.remove(appKey)
-        } else {
-            set.insert(appKey)
+        for app in apps {
+            let row = GPAppRow()
+            let info = GPCatalog.info(for: app)
+            row.configure(name: app.name ?? "",
+                          subtitle: info.sourceTag,
+                          cover: GPCatalog.coverImage(for: app))
+            row.accessibilityIdentifier = GPCatalog.appKey(host: host, app: app)
+            row.addTarget(self, action: #selector(appRowTapped(_:)), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(row)
         }
-        UserDefaults.standard.set(Array(set), forKey: key)
+    }
+
+    // MARK: - Actions — navigation first
+
+    @objc private func appRowTapped(_ sender: GPAppRow) {
+        guard let host = GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first,
+              let key = sender.accessibilityIdentifier,
+              let app = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.appKey(host: host, app: $0) == key })
+        else { return }
+        navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)
+    }
+
+    @objc private func goHome() {
+        if let tabBar = navigationController?.viewControllers.first as? GPTabBarController {
+            tabBar.selectedIndex = 0
+        }
+    }
+
+    @objc private func openHostPage() {
+        guard let host = GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first else { return }
+        navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
+    }
+
+    @objc private func retryAppList() {
+        guard let host = GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first else { return }
+        GPSessionController.shared.fetchAppList(for: host)
     }
 }
