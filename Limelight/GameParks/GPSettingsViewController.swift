@@ -81,9 +81,11 @@ enum GPSettingsStore {
     static let presets: [Preset] = [
         Preset(title: "Home Wi-Fi", detail: "1080p · 60 fps · 20 Mb/s · Auto codec",
                width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, codec: 0),
-        Preset(title: "Mobile data saver", detail: "720p · 30 fps · 8 Mb/s",
+        // B-38: every preset applies codec 0 (Auto), so every
+        // detail string discloses it — not just Home Wi-Fi's.
+        Preset(title: "Mobile data saver", detail: "720p · 30 fps · 8 Mb/s · Auto codec",
                width: 1280, height: 720, fps: 30, bitrateKbps: 8000, codec: 0),
-        Preset(title: "Cloud — best quality", detail: "1080p HQ · 60 fps · 25 Mb/s",
+        Preset(title: "Cloud — best quality", detail: "1080p HQ · 60 fps · 25 Mb/s · Auto codec",
                width: 1920, height: 1080, fps: 60, bitrateKbps: 25000, codec: 0),
     ]
 
@@ -133,12 +135,20 @@ final class GPSettingsViewController: GPBaseViewController {
         contentStack.addArrangedSubview(dynamicStack)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
                                                name: .GPHostsChanged, object: nil)
+        // B-15: the A-18 save-failure signal finally gets an
+        // observer — a failed save rebuilds immediately, and the
+        // rebuild surfaces the "Settings unavailable" state at the
+        // moment of the tap instead of staying silent.
+        NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
+                                               name: GPSettingsStore.saveFailedNotification, object: nil)
         rebuildContent()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        performContentRebuild()
+        // B-17 (A-31 residual): appearance goes through the
+        // scroll-safe path like the other tab roots.
+        requestContentRebuild()
     }
 
     @objc private func stateChanged() {
@@ -254,7 +264,9 @@ final class GPSettingsViewController: GPBaseViewController {
                 row.subtitle = "Connecting…"
             }
             row.valueLabel.text = "Manage"
-            row.accessibilityIdentifier = knownHost.uuid
+            // A-27 completed: tap identity rides on the row's
+            // dedicated hostUUID, never accessibilityIdentifier.
+            row.hostUUID = knownHost.uuid
             row.addTarget(self, action: #selector(hostRowTapped(_:)), for: .touchUpInside)
             dynamicStack.addArrangedSubview(row)
         }
@@ -276,6 +288,11 @@ final class GPSettingsViewController: GPBaseViewController {
     /// Simple 2, Full 3, plus Auto-with-gamepad variants.
     static func oscSubtitle(level: Int) -> String {
         switch level {
+        // A-37 completed: level 0 is Off and must say so — it
+        // previously fell into the Auto default while the switch
+        // was off. Levels 4–6 are the engine's Auto-with-gamepad
+        // variants, for which the Auto wording is truthful.
+        case 0: return "Off"
         case 2: return "Simple — basic buttons, always shown"
         case 3: return "Full — full controls, always shown"
         default: return "Auto — hides when a controller is connected"
@@ -294,7 +311,7 @@ final class GPSettingsViewController: GPBaseViewController {
     }
 
     @objc private func hostRowTapped(_ sender: GPRow) {
-        guard let uuid = sender.accessibilityIdentifier,
+        guard let uuid = sender.hostUUID,
               let host = GPSessionController.shared().hosts.first(where: { $0.uuid == uuid }) else { return }
         GPSessionController.shared().selectHost(host)
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
@@ -318,7 +335,14 @@ final class GPStreamSettingsViewController: GPBaseViewController {
     // an exotic stored value as its own segment when one exists.
     private var resolutionSizes: [(width: Int, height: Int)] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
     private var frameRates: [Int] = [30, 60, 90, 120]
+    /// B-18: surround channel counts are a table like the other
+    /// knobs, so an out-of-list stored count gets its own segment.
+    private var surroundCounts: [Int] = [2, 6, 8]
     private let codecPrefs: [UInt32] = [0, 2, 1, 3] // Auto, H.265 (HEVC), H.264, AV1
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -327,7 +351,16 @@ final class GPStreamSettingsViewController: GPBaseViewController {
         dynamicStack.axis = .vertical
         dynamicStack.spacing = 16
         contentStack.addArrangedSubview(dynamicStack)
+        // B-15: observe the save-failure signal here too — this is
+        // the screen whose controls save most often.
+        NotificationCenter.default.addObserver(self, selector: #selector(saveFailed),
+                                               name: GPSettingsStore.saveFailedNotification, object: nil)
         rebuildContent()
+    }
+
+    @objc private func saveFailed() {
+        // The rebuild surfaces the "Settings unavailable" state.
+        requestContentRebuild()
     }
 
     override func rebuildContent() {
@@ -356,23 +389,31 @@ final class GPStreamSettingsViewController: GPBaseViewController {
 
         dynamicStack.addArrangedSubview(gpSectionHeader("Fine tuning"))
 
-        // A-40: exact-height match first; a stored size outside the
-        // list gets its own segment labelled with its exact height
-        // rather than silently displaying as a listed size.
+        // A-40 completed: matching is by the exact (width, height)
+        // pair, never height alone — v2.5 keyed on height only, so
+        // a stored 2560×1080 displayed as "1080p" and the first tap
+        // silently rewrote its width to 1920. A stored size outside
+        // the list gets its own segment labelled with its exact
+        // dimensions, and selecting it writes the same pair back:
+        // the value round-trips honestly.
         resolutionSizes = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
         let storedWidth = cur?.width?.intValue ?? 1920
         let storedHeight = cur?.height?.intValue ?? 1080
-        if !resolutionSizes.contains(where: { $0.height == storedHeight }) {
+        let standardSizes = resolutionSizes
+        if !resolutionSizes.contains(where: { $0.width == storedWidth && $0.height == storedHeight }) {
             resolutionSizes.append((storedWidth, storedHeight))
         }
         let resolutionItems = resolutionSizes.map { size -> String in
-            switch size.height {
-            case 2160: return "4K"
-            default: return "\(size.height)p"
+            if standardSizes.contains(where: { $0.width == size.width && $0.height == size.height }) {
+                switch size.height {
+                case 2160: return "4K"
+                default: return "\(size.height)p"
+                }
             }
+            return "\(size.width)×\(size.height)"
         }
         let resolution = gpSegmented(items: resolutionItems)
-        resolution.selectedSegmentIndex = resolutionSizes.firstIndex(where: { $0.height == storedHeight }) ?? 1
+        resolution.selectedSegmentIndex = resolutionSizes.firstIndex(where: { $0.width == storedWidth && $0.height == storedHeight }) ?? 1
         resolution.addTarget(self, action: #selector(resolutionChanged(_:)), for: .valueChanged)
         dynamicStack.addArrangedSubview(controlCard(title: "Resolution", control: resolution))
 
@@ -430,9 +471,25 @@ final class GPStreamSettingsViewController: GPBaseViewController {
         ])
         dynamicStack.addArrangedSubview(bitrateCard)
 
-        let surround = gpSegmented(items: ["Stereo", "5.1", "7.1"])
-        surround.selectedSegmentIndex = (cur?.audioConfig?.intValue ?? 2) >= 8 ? 2
-            : ((cur?.audioConfig?.intValue ?? 2) >= 6 ? 1 : 0)
+        // B-18: exact-count matching, like resolution/fps — an
+        // out-of-list stored count (e.g. 4 or 7) gets its own
+        // segment instead of displaying as a listed value and being
+        // silently rewritten on first touch.
+        surroundCounts = [2, 6, 8]
+        let storedChannels = cur?.audioConfig?.intValue ?? 2
+        if !surroundCounts.contains(storedChannels) {
+            surroundCounts.append(storedChannels)
+        }
+        let surroundItems = surroundCounts.map { count -> String in
+            switch count {
+            case 2: return "Stereo"
+            case 6: return "5.1"
+            case 8: return "7.1"
+            default: return "\(count) ch"
+            }
+        }
+        let surround = gpSegmented(items: surroundItems)
+        surround.selectedSegmentIndex = surroundCounts.firstIndex(of: storedChannels) ?? 0
         surround.addTarget(self, action: #selector(surroundChanged(_:)), for: .valueChanged)
         dynamicStack.addArrangedSubview(controlCard(title: "Surround audio", control: surround))
         // A-41: the engine clamps to the phone's physical output.
@@ -513,7 +570,10 @@ final class GPStreamSettingsViewController: GPBaseViewController {
     }
 
     @objc private func surroundChanged(_ sender: UISegmentedControl) {
-        GPSettingsStore.save(audioChannels: [2, 6, 8][sender.selectedSegmentIndex])
+        // B-18: bounds-guarded like its sibling handlers, and reads
+        // the table (which may carry an exotic stored count).
+        guard surroundCounts.indices.contains(sender.selectedSegmentIndex) else { return }
+        GPSettingsStore.save(audioChannels: surroundCounts[sender.selectedSegmentIndex])
     }
 }
 

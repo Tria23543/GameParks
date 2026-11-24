@@ -185,6 +185,9 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
     /// A-89: an offset restore is outstanding until the deferred
     /// re-clamp has run.
     private var restoreOutstanding = false
+    /// B-32: generation of the latest rebuild; a deferred re-clamp
+    /// may only act while its own rebuild is still the latest.
+    private var rebuildGeneration = 0
 
     /// Screens override this to (re)build their dynamic content.
     /// Notification handlers must not call it directly — they go
@@ -240,8 +243,14 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
         // schedule one deferred re-clamp while this restore is
         // outstanding.
         restoreOutstanding = true
+        rebuildGeneration += 1
+        let generation = rebuildGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.restoreOutstanding else { return }
+            // B-32: if a newer rebuild has run since this one was
+            // scheduled, its re-clamp supersedes this one — do not
+            // clear its outstanding flag or clamp to this stale offset.
+            guard let self = self, self.restoreOutstanding,
+                  self.rebuildGeneration == generation else { return }
             self.restoreOutstanding = false
             self.view.layoutIfNeeded()
             self.clampScrollOffset(to: offsetY)
@@ -432,6 +441,10 @@ final class GPRow: GPGuardedControl {
     private let chevronLabel = gpLabel("›", font: GPFont.display(20, weight: .bold), color: GPColor.textFaint, lines: 1)
     /// A-27: dedicated tap identity where a row represents an app.
     var appKey: String?
+    /// A-27: dedicated tap identity where a row represents a host
+    /// (Settings host rows) — identity never rides on
+    /// accessibilityIdentifier.
+    var hostUUID: String?
 
     /// A-27: spoken label/value from the visible title, subtitle
     /// and value.
