@@ -16,6 +16,15 @@ final class GPHomeViewController: GPBaseViewController {
 
     private let dynamicStack = UIStackView()
     private let refreshControl = UIRefreshControl()
+    /// A-74: the host the visible rows were rendered for; tap
+    /// handlers resolve against it, not the session's (possibly
+    /// since-changed) selection.
+    private var renderingHost: TemporaryHost?
+    /// A-20: the app key the hero card displays; resolved at tap
+    /// time, never recomputed.
+    private var heroAppKey: String?
+    /// A-113: a pull is waiting for its first notification.
+    private var refreshAwaitingNotification = false
     private var railScrollViews: [UIScrollView] = []
 
     /// The horizontal game rails scroll independently of the page;
@@ -48,19 +57,29 @@ final class GPHomeViewController: GPBaseViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        performContentRebuild()
+        // A-31: appearance goes through the scroll-safe path.
+        requestContentRebuild()
     }
 
     @objc private func stateChanged() {
+        // A-113: the first notification after a pull ends the spinner.
+        if refreshAwaitingNotification {
+            refreshAwaitingNotification = false
+            refreshControl.endRefreshing()
+        }
         requestContentRebuild()
     }
 
     @objc private func pulledToRefresh() {
         GPSessionController.shared().rescanLocalNetwork()
-        // The scan reports through the normal notifications; stop
-        // the spinner shortly after regardless.
+        // A-113: the spinner ends on the first hosts/app-list
+        // notification after the pull (see stateChanged); this timer
+        // is only a backstop if no notification ever arrives.
+        refreshAwaitingNotification = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.refreshControl.endRefreshing()
+            guard let self = self, self.refreshAwaitingNotification else { return }
+            self.refreshAwaitingNotification = false
+            self.refreshControl.endRefreshing()
         }
     }
 
@@ -71,9 +90,11 @@ final class GPHomeViewController: GPBaseViewController {
         let session = GPSessionController.shared()
 
         guard let host = session.selectedHost ?? session.hosts.first else {
+            renderingHost = nil
             dynamicStack.addArrangedSubview(searchingView())
             return
         }
+        renderingHost = host
 
         dynamicStack.addArrangedSubview(hostCard(for: host))
 
@@ -103,6 +124,18 @@ final class GPHomeViewController: GPBaseViewController {
     private func rebuildPairedContent(for host: TemporaryHost) {
         let session = GPSessionController.shared()
         let apps = GPCatalog.sortedApps(for: host)
+
+        // A-21: a paired PC that is offline says so up front, with
+        // the same Wake route the unpaired branch offers.
+        if host.state == .offline {
+            let offlineMessage = GPMessageView()
+            offlineMessage.configure(
+                title: "Your PC looks offline",
+                message: "If it's asleep, open its page and tap Wake PC. If it's on, check Sunshine is running.",
+                actionTitle: "Open PC page")
+            offlineMessage.actionButton.addTarget(self, action: #selector(openSelectedHostPage), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(offlineMessage)
+        }
 
         if apps.isEmpty {
             let message = GPMessageView()
@@ -136,7 +169,7 @@ final class GPHomeViewController: GPBaseViewController {
 
         let bigGames = apps.filter { !GPCatalog.info(for: $0).isClassic && !GPCatalog.isDesktop($0) }
         if !bigGames.isEmpty {
-            dynamicStack.addArrangedSubview(gpSectionHeader("Jump back in", subtitle: "Steam library"))
+            dynamicStack.addArrangedSubview(gpSectionHeader("Jump back in", subtitle: "Your big games"))
             dynamicStack.addArrangedSubview(rail(for: host, apps: bigGames))
         }
 
@@ -188,7 +221,7 @@ final class GPHomeViewController: GPBaseViewController {
             dot.heightAnchor.constraint(equalToConstant: 10),
         ])
 
-        let nameLabel = gpLabel(host.name, font: GPFont.display(18, weight: .bold), color: GPColor.textPrimary, lines: 1)
+        let nameLabel = gpLabel(host.name, font: GPFont.display(18, weight: .bold), color: GPColor.textPrimary, lines: 2)
         let titleRow = UIStackView(arrangedSubviews: [dot, nameLabel])
         titleRow.axis = .horizontal
         titleRow.alignment = .center
@@ -198,7 +231,13 @@ final class GPHomeViewController: GPBaseViewController {
         let statusText: String
         switch (host.state, host.pairState) {
         case (.online, .paired):
-            statusText = "Online · Home Wi-Fi · Sunshine ready"
+            // A-48: claim "Home Wi-Fi" only when the address actually
+            // in use is the host's local address; otherwise stay neutral.
+            if let active = host.activeAddress, let local = host.localAddress, active == local {
+                statusText = "Online · Home Wi-Fi · Sunshine ready"
+            } else {
+                statusText = "Online · Sunshine ready"
+            }
         case (.online, _):
             statusText = "Online · Not paired — tap to pair"
         case (.offline, _):
@@ -206,7 +245,7 @@ final class GPHomeViewController: GPBaseViewController {
         default:
             statusText = "Connecting…"
         }
-        card.stack.addArrangedSubview(gpLabel(statusText, font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
+        card.stack.addArrangedSubview(gpLabel(statusText, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2))
 
         let session = GPSessionController.shared()
         if host.state == .online, session.lastPingMs(for: host) >= 0 {
@@ -220,12 +259,16 @@ final class GPHomeViewController: GPBaseViewController {
     private func heroCard(host: TemporaryHost, app: TemporaryApp) -> UIView {
         let card = GPCardButton()
         let key = GPCatalog.appKey(host: host, app: app)
+        // A-20: bind the displayed app's key to the card itself.
+        card.appKey = key
+        card.accessibilityIdentifier = key
+        heroAppKey = key
         card.stack.addArrangedSubview(gpLabel(app.name, font: GPFont.display(20, weight: .extrabold), color: GPColor.textPrimary, lines: 2))
         let played = GPStats.shared.seconds(forAppKey: key)
         let subtitle = played > 0
             ? "\(gpFormatPlaytime(played)) played · Last played \(gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key)).lowercased())"
             : "Last played \(gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key)).lowercased())"
-        card.stack.addArrangedSubview(gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
+        card.stack.addArrangedSubview(gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2))
 
         let playPill = gpLabel("  ▶  Play  ", font: GPFont.display(14, weight: .bold), color: GPColor.onAccent, lines: 1)
         playPill.backgroundColor = GPColor.accent
@@ -236,7 +279,7 @@ final class GPHomeViewController: GPBaseViewController {
         pillRow.axis = .horizontal
         card.stack.addArrangedSubview(pillRow)
 
-        card.addTarget(self, action: #selector(heroCardTapped), for: .touchUpInside)
+        card.addTarget(self, action: #selector(heroCardTapped(_:)), for: .touchUpInside)
         return card
     }
 
@@ -268,7 +311,18 @@ final class GPHomeViewController: GPBaseViewController {
             poster.widthAnchor.constraint(equalToConstant: 118).isActive = true
             poster.addTarget(self, action: #selector(posterTapped(_:)), for: .touchUpInside)
             poster.accessibilityIdentifier = key
+            poster.appKey = key
             row.addArrangedSubview(poster)
+        }
+
+        // A-81: a rail holds 10; anything beyond gets a route out.
+        if apps.count > 10 {
+            let seeAll = GPPosterView()
+            seeAll.configure(name: "See all", subtitle: "In Library", cover: nil)
+            seeAll.translatesAutoresizingMaskIntoConstraints = false
+            seeAll.widthAnchor.constraint(equalToConstant: 118).isActive = true
+            seeAll.addTarget(self, action: #selector(seeAllTapped), for: .touchUpInside)
+            row.addArrangedSubview(seeAll)
         }
 
         NSLayoutConstraint.activate([
@@ -296,9 +350,13 @@ final class GPHomeViewController: GPBaseViewController {
         hostCardTapped()
     }
 
-    @objc private func heroCardTapped() {
+    @objc private func heroCardTapped(_ sender: GPCardButton) {
+        // A-20: resolve the key stored on the card; if it no longer
+        // resolves, do nothing — never recompute most-recent here.
         guard let host = currentHost(),
-              let app = mostRecentApp(for: host) else { return }
+              let key = sender.appKey ?? heroAppKey,
+              let app = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.appKey(host: host, app: $0) == key })
+        else { return }
         navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)
     }
 
@@ -309,10 +367,15 @@ final class GPHomeViewController: GPBaseViewController {
     }
 
     @objc private func posterTapped(_ sender: GPPosterView) {
-        guard let host = currentHost(), let key = sender.accessibilityIdentifier,
+        guard let host = currentHost(), let key = sender.appKey,
               let app = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.appKey(host: host, app: $0) == key })
         else { return }
         navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)
+    }
+
+    @objc private func seeAllTapped() {
+        // A-81: tab switch alone (the Library opens on its All filter).
+        tabBarController?.selectedIndex = 1
     }
 
     @objc private func retryAppList() {
@@ -331,6 +394,8 @@ final class GPHomeViewController: GPBaseViewController {
     // MARK: - Helpers
 
     private func currentHost() -> TemporaryHost? {
+        // A-74: resolve taps against the rendering host.
+        if let renderingHost = renderingHost { return renderingHost }
         return GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first
     }
 

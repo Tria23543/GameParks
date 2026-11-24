@@ -55,6 +55,11 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
         return;
     }
 
+    // A-99: never divide by an unset aspect ratio.
+    if (_streamAspectRatio <= 0) {
+        return;
+    }
+
     CGSize videoSize;
     if (_view.bounds.size.width > _view.bounds.size.height * _streamAspectRatio) {
         videoSize = CGSizeMake(_view.bounds.size.height * _streamAspectRatio, _view.bounds.size.height);

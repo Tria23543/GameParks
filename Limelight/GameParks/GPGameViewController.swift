@@ -16,15 +16,24 @@ final class GPGameViewController: GPBaseViewController {
 
     private let hostUUID: String
     private let appID: String
+    private let appName: String
+    private let hostName: String
     private var host: TemporaryHost
     private var app: TemporaryApp
     private let dynamicStack = UIStackView()
+    /// A-76: header labels, refreshed in rebuildContent.
+    private var headerTitleLabel: UILabel?
+    private var headerSubtitleLabel: UILabel?
+    /// A-24: set once re-resolution has failed.
+    private var appUnavailable = false
 
     init(host: TemporaryHost, app: TemporaryApp) {
         self.host = host
         self.app = app
         self.hostUUID = host.uuid ?? ""
         self.appID = app.id ?? ""
+        self.appName = app.name ?? ""
+        self.hostName = host.name ?? ""
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -33,9 +42,13 @@ final class GPGameViewController: GPBaseViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         let info = GPCatalog.info(for: app)
-        contentStack.addArrangedSubview(makeHeader(title: app.name ?? "Game",
-                                                   subtitle: info.detailLine ?? info.sourceTag,
-                                                   showsBack: true))
+        let header = makeHeader(title: app.name ?? "Game",
+                                subtitle: info.detailLine ?? info.sourceTag,
+                                showsBack: true)
+        let headerLabels = (header as? UIStackView)?.arrangedSubviews.compactMap { $0 as? UILabel } ?? []
+        headerTitleLabel = headerLabels.first
+        headerSubtitleLabel = headerLabels.dropFirst().first
+        contentStack.addArrangedSubview(header)
         dynamicStack.axis = .vertical
         dynamicStack.spacing = 16
         contentStack.addArrangedSubview(dynamicStack)
@@ -49,17 +62,67 @@ final class GPGameViewController: GPBaseViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        performContentRebuild()
+        // A-31: appearance goes through the scroll-safe path.
+        requestContentRebuild()
+    }
+
+    /// A-77: an id match counts only when BOTH ids are non-empty.
+    private func idMatches(_ candidate: TemporaryApp) -> Bool {
+        guard let candidateID = candidate.id, !candidateID.isEmpty, !appID.isEmpty else { return false }
+        return candidateID == appID
+    }
+
+    private func isThisApp(_ candidate: TemporaryApp?) -> Bool {
+        guard let candidate = candidate else { return false }
+        return idMatches(candidate)
     }
 
     @objc private func stateChanged() {
-        if let currentHost = GPSessionController.shared().hosts.first(where: { $0.uuid == hostUUID }) {
-            host = currentHost
-            if let currentApp = GPCatalog.sortedApps(for: currentHost).first(where: { $0.id == appID }) {
-                app = currentApp
+        let hosts = GPSessionController.shared().hosts
+        // A-77: nil/empty UUID falls back to a name match.
+        guard let currentHost = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
+            ?? (hostUUID.isEmpty ? hosts.first(where: { $0.name == hostName }) : nil) else {
+            markUnavailable()
+            return
+        }
+        host = currentHost
+        let apps = GPCatalog.sortedApps(for: currentHost)
+        if apps.isEmpty {
+            // The list hasn't loaded for this host yet — absence
+            // here is not proof the game is gone.
+            requestContentRebuild()
+            return
+        }
+        if let currentApp = apps.first(where: { idMatches($0) }) {
+            app = currentApp
+        } else if !appID.isEmpty {
+            // A-77: id matching failed — fall back to the name-based
+            // identity the appKey uses (host UUID + name).
+            if let byName = apps.first(where: { ($0.name ?? "") == appName }) {
+                app = byName
+            } else {
+                markUnavailable()
+                return
             }
+        } else if let byName = apps.first(where: { ($0.name ?? "") == appName }) {
+            app = byName
+        } else {
+            markUnavailable()
+            return
         }
         requestContentRebuild()
+    }
+
+    /// A-24: the game (or its host) is gone — pop if topmost, else
+    /// show a not-available state.
+    private func markUnavailable() {
+        if appUnavailable { requestContentRebuild(); return }
+        appUnavailable = true
+        if navigationController?.topViewController === self {
+            navigationController?.popViewController(animated: true)
+        } else {
+            requestContentRebuild()
+        }
     }
 
     // MARK: - Rendering
@@ -69,6 +132,20 @@ final class GPGameViewController: GPBaseViewController {
         let session = GPSessionController.shared()
         let info = GPCatalog.info(for: app)
         let key = GPCatalog.appKey(host: host, app: app)
+
+        // A-76: header follows the freshest app/host objects.
+        headerTitleLabel?.text = app.name ?? "Game"
+        headerSubtitleLabel?.text = info.detailLine ?? info.sourceTag
+
+        if appUnavailable {
+            let message = GPMessageView()
+            message.configure(title: "This game is no longer available",
+                              message: "It was removed from Sunshine or its PC is no longer known to GameParks.",
+                              actionTitle: "Back")
+            message.actionButton.addTarget(self, action: #selector(gpGoBack), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(message)
+            return
+        }
 
         // Cover banner
         let banner = UIView()
@@ -119,20 +196,22 @@ final class GPGameViewController: GPBaseViewController {
             dynamicStack.addArrangedSubview(message)
         } else {
             let running = session.runningApp(for: host)
-            let playButton = gpPrimaryButton(running?.id == app.id ? "Resume on \(host.name ?? "your PC")" : "Play on \(host.name ?? "your PC")")
+            let playButton = gpPrimaryButton(isThisApp(running) ? "Resume on \(host.name ?? "your PC")" : "Play on \(host.name ?? "your PC")")
             playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
             dynamicStack.addArrangedSubview(playButton)
-            if let running = running, running.id != app.id {
+            if let running = running, !isThisApp(running) {
                 dynamicStack.addArrangedSubview(gpLabel("\(running.name ?? "Another game") is currently running on this PC — you'll get the choice to resume it or switch.",
                                                          font: GPFont.body(12), color: GPColor.textFaint, lines: 0))
             }
         }
 
         // Stats row
-        let settings = DataManager().getSettings()
-        let streamSummary = settings != nil
-            ? "\(settings!.height?.intValue ?? 1080)p\(settings!.framerate?.intValue ?? 60)"
-            : "1080p60"
+        let streamSummary: String
+        if let settings = DataManager().getSettings() {
+            streamSummary = "\(settings.height?.intValue ?? 1080)p\(settings.framerate?.intValue ?? 60)"
+        } else {
+            streamSummary = "1080p60"
+        }
         let statsRow = UIStackView(arrangedSubviews: [
             statTile(title: "Played", value: gpFormatPlaytime(GPStats.shared.seconds(forAppKey: key))),
             statTile(title: "Last played", value: gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key))),
@@ -147,7 +226,7 @@ final class GPGameViewController: GPBaseViewController {
         dynamicStack.addArrangedSubview(gpSectionHeader("This game"))
         let favouriteRow = GPSwitchRow()
         favouriteRow.titleLabel.text = "Favourite"
-        favouriteRow.subtitle = "Keep it one tap away in Library"
+        favouriteRow.subtitle = "Show it under the Favourites filter in Library"
         favouriteRow.isOn = GPCatalog.isFavourite(host: host, app: app)
         favouriteRow.onToggle = { [weak self] isOn in
             guard let self = self else { return }
@@ -155,16 +234,16 @@ final class GPGameViewController: GPBaseViewController {
         }
         dynamicStack.addArrangedSubview(favouriteRow)
 
-        let perGameRow = GPRow()
+        let perGameRow = GPRow(showsChevron: false)
         perGameRow.titleLabel.text = "Per-game settings"
-        perGameRow.subtitle = "Resolution & bitrate just for this title"
+        perGameRow.subtitle = "One stream setup for every game"
         perGameRow.valueLabel.text = "Info"
         perGameRow.addTarget(self, action: #selector(perGameSettingsTapped), for: .touchUpInside)
         dynamicStack.addArrangedSubview(perGameRow)
 
-        let launchRow = GPRow()
+        let launchRow = GPRow(showsChevron: false)
         launchRow.titleLabel.text = "Launch options"
-        launchRow.subtitle = "Start fullscreen · skip intro videos"
+        launchRow.subtitle = "Games start from Sunshine as-is"
         launchRow.valueLabel.text = "Info"
         launchRow.addTarget(self, action: #selector(launchOptionsTapped), for: .touchUpInside)
         dynamicStack.addArrangedSubview(launchRow)
@@ -176,8 +255,11 @@ final class GPGameViewController: GPBaseViewController {
         let tile = UIView()
         tile.backgroundColor = GPColor.panel
         tile.layer.cornerRadius = 16
+        let valueLabel = gpLabel(value, font: GPFont.display(16, weight: .bold), color: GPColor.textPrimary, lines: 1)
+        valueLabel.adjustsFontSizeToFitWidth = true
+        valueLabel.minimumScaleFactor = 0.7
         let stack = UIStackView(arrangedSubviews: [
-            gpLabel(value, font: GPFont.display(16, weight: .bold), color: GPColor.textPrimary, lines: 1),
+            valueLabel,
             gpLabel(title, font: GPFont.body(11), color: GPColor.textSecondary, lines: 1),
         ])
         stack.axis = .vertical
@@ -202,7 +284,7 @@ final class GPGameViewController: GPBaseViewController {
             pushConnecting(app: app)
             return
         }
-        if running.id == app.id {
+        if isThisApp(running) {
             pushConnecting(app: app)
             return
         }
@@ -233,6 +315,9 @@ final class GPGameViewController: GPBaseViewController {
     }
 
     @objc private func openHostPage() {
+        // A-25: the PC page (and any Library route from it) must be
+        // about THIS host.
+        GPSessionController.shared().selectHost(host)
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
     }
 

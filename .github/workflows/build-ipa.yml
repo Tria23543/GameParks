@@ -4,6 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    # A-108: don't spend a full macOS build on docs-only pushes.
+    paths:
+      - 'Limelight/**'
+      - 'Moonlight.xcodeproj/**'
+      - '.github/workflows/build-ipa.yml'
 
 jobs:
   build:
@@ -13,6 +18,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # A-108: pin the toolchain to the newest Xcode on the runner
+      # instead of silently inheriting the runner image's default.
+      - name: Select newest Xcode available
+        run: |
+          XCODE_APP=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$XCODE_APP" ]; then
+            echo "Selecting $XCODE_APP"
+            sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          else
+            echo "No Xcode_*.app found; using the runner default"
+          fi
+          xcodebuild -version
 
       - name: Build GameParks (Release, iphoneos, no signing)
         run: |
@@ -28,17 +46,31 @@ jobs:
 
       - name: Package unsigned IPA
         run: |
-          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -n 1)
+          # A-100: package GameParks.app specifically, and fail here
+          # — with a clear message — if it isn't there.
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name 'GameParks.app' | head -n 1)
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "GameParks.app not found in build output" >&2
+            exit 1
+          fi
           echo "Packaging $APP_PATH"
+          # A-101: name the IPA from the built app's own version, so
+          # versions are distinguishable by filename.
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")
+          IPA_FILE="GameParks-unsigned-v${VERSION}.ipa"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "IPA_FILE=$IPA_FILE" >> "$GITHUB_ENV"
           rm -rf Payload
           mkdir Payload
           cp -R "$APP_PATH" Payload/
-          zip -r -y GameParks-unsigned.ipa Payload
-          ls -lh GameParks-unsigned.ipa
+          zip -r -y "$IPA_FILE" Payload
+          ls -lh "$IPA_FILE"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GameParks-unsigned-ipa
-          path: GameParks-unsigned.ipa
+          name: GameParks-unsigned-ipa-v${{ env.VERSION }}
+          path: ${{ env.IPA_FILE }}
           if-no-files-found: error
+          # A-108: don't keep every build forever.
+          retention-days: 30

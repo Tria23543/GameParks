@@ -9,6 +9,14 @@
 //  onto the navigation stack, the way upstream's push segue does.
 //  Every failure lands on words plus a next action, never a void.
 //
+//  Steps advance on the host's actual state, not on timers
+//  (A-12): after each activateHost the screen waits — via the
+//  session's GPHostsChanged notifications plus a polling fallback,
+//  against a host re-resolved fresh by UUID at every check — until
+//  the host reports online, with an explicit timeout. Every async
+//  block carries the run generation it was scheduled in (A-34), so
+//  a retry or a disappearance retires the previous run outright.
+//
 
 import UIKit
 import GameController
@@ -20,15 +28,28 @@ final class GPConnectingViewController: GPBaseViewController {
         case pending, active, done, warning, failed
     }
 
+    private enum Phase {
+        case idle, waking, starting, finished
+    }
+
     private let hostUUID: String
     private var host: TemporaryHost
     private let app: TemporaryApp
 
     private var stepRows: [(icon: UILabel, label: UILabel, spinner: UIActivityIndicatorView)] = []
+    private var originalStepTitles: [String] = []
     private let footerStack = UIStackView()
     private var cancelled = false
     private var launched = false
-    private var wakeAttempts = 0
+    private var runGeneration = 0
+    private var phase: Phase = .idle
+
+    // The in-flight state wait (A-12): one at a time, driven by
+    // host-change notifications and a polling fallback.
+    private var waitDeadline: Date?
+    private var waitOnOnline: (() -> Void)?
+    private var waitOnTimeout: (() -> Void)?
+    private var lastActivation: Date?
 
     init(host: TemporaryHost, app: TemporaryApp) {
         self.host = host
@@ -38,6 +59,10 @@ final class GPConnectingViewController: GPBaseViewController {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -56,13 +81,25 @@ final class GPConnectingViewController: GPBaseViewController {
             "Negotiating stream · \(streamSummary)",
             "Controller connected",
         ]
+        originalStepTitles = stepTitles
         for title in stepTitles {
             contentStack.addArrangedSubview(makeStepRow(title: title))
         }
 
+        // A-50: an explicit way out, wired to the same cancelled
+        // flag as disappearing.
+        let cancelButton = gpSecondaryButton("Cancel")
+        cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
+        contentStack.addArrangedSubview(cancelButton)
+
         footerStack.axis = .vertical
         footerStack.spacing = 12
         contentStack.addArrangedSubview(footerStack)
+
+        NotificationCenter.default.addObserver(self, selector: #selector(hostsChanged),
+                                               name: .GPHostsChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground),
+                                               name: UIApplication.willEnterForegroundNotification, object: nil)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -76,7 +113,46 @@ final class GPConnectingViewController: GPBaseViewController {
         super.viewDidDisappear(animated)
         if !launched {
             cancelled = true
+            runGeneration += 1
+            clearWait()
         }
+    }
+
+    @objc private func cancelTapped() {
+        cancelled = true
+        runGeneration += 1
+        clearWait()
+        gpGoBack()
+    }
+
+    /// A-50: foregrounding re-validates the current step — if the
+    /// wait's state has gone stale, restart the wait for that step.
+    @objc private func appWillEnterForeground() {
+        guard !launched, !cancelled else { return }
+        refreshHost()
+        switch phase {
+        case .waking, .starting:
+            if waitOnOnline == nil {
+                // The wait was cleared while backgrounded; restart
+                // the current step's wait from scratch.
+                if phase == .waking {
+                    stepWake()
+                } else {
+                    stepStart()
+                }
+            } else {
+                checkWait()
+            }
+        case .idle, .finished:
+            break
+        }
+    }
+
+    @objc private func hostsChanged() {
+        // A host-list change may be the state we've been waiting
+        // for — re-check immediately instead of waiting for a poll.
+        guard waitOnOnline != nil else { return }
+        checkWait()
     }
 
     // MARK: - Checklist UI
@@ -166,6 +242,7 @@ final class GPConnectingViewController: GPBaseViewController {
     }
 
     private func showFailure(message: String) {
+        phase = .finished
         footerStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let note = GPMessageView()
         note.configure(title: "Couldn't connect", message: message, actionTitle: "Try again")
@@ -178,23 +255,82 @@ final class GPConnectingViewController: GPBaseViewController {
 
     @objc private func retryTapped() {
         footerStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        // A-105: restore the original step titles as well as states.
         for index in stepRows.indices {
-            setStep(index, state: .pending)
+            let title = originalStepTitles.indices.contains(index) ? originalStepTitles[index] : nil
+            setStep(index, state: .pending, text: title)
         }
-        cancelled = false
-        wakeAttempts = 0
         runSequence()
+    }
+
+    // MARK: - State waiting (A-12)
+
+    private func clearWait() {
+        waitDeadline = nil
+        waitOnOnline = nil
+        waitOnTimeout = nil
+    }
+
+    /// Waits until the freshly re-resolved host reports .online.
+    /// `activateHost` is (re-)issued at most every few seconds;
+    /// progress is driven by GPHostsChanged plus a 0.5 s polling
+    /// fallback, and the wait fails at the absolute deadline.
+    private func waitForOnline(timeout: TimeInterval,
+                               onOnline: @escaping () -> Void,
+                               onTimeout: @escaping () -> Void) {
+        let generation = runGeneration
+        waitDeadline = Date().addingTimeInterval(timeout)
+        waitOnOnline = onOnline
+        waitOnTimeout = onTimeout
+        lastActivation = nil
+        scheduleWaitPoll(generation: generation)
+        checkWait()
+    }
+
+    private func scheduleWaitPoll(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, !self.cancelled, generation == self.runGeneration,
+                  self.waitOnOnline != nil else { return }
+            self.checkWait()
+            if self.waitOnOnline != nil {
+                self.scheduleWaitPoll(generation: generation)
+            }
+        }
+    }
+
+    private func checkWait() {
+        guard !cancelled, let onOnline = waitOnOnline, let onTimeout = waitOnTimeout,
+              let deadline = waitDeadline else { return }
+        refreshHost()
+        if host.state == .online {
+            clearWait()
+            onOnline()
+            return
+        }
+        if Date() >= deadline {
+            clearWait()
+            onTimeout()
+            return
+        }
+        // Keep the server-info round trips coming, spaced out.
+        if lastActivation == nil || Date().timeIntervalSince(lastActivation!) >= 3 {
+            lastActivation = Date()
+            GPSessionController.shared().activateHost(host, userInitiated: false, skipFastPath: true)
+        }
     }
 
     // MARK: - The sequence
 
     private func runSequence() {
+        runGeneration += 1
         cancelled = false
+        clearWait()
         stepWake()
     }
 
     private func stepWake() {
         guard !cancelled else { return }
+        phase = .waking
         refreshHost()
         if host.state == .online {
             setStep(0, state: .done)
@@ -203,55 +339,54 @@ final class GPConnectingViewController: GPBaseViewController {
         }
         setStep(0, state: .active)
         GPSessionController.shared().wakeHost(host)
-        pollForWake()
-    }
-
-    private func pollForWake() {
-        guard !cancelled else { return }
-        wakeAttempts += 1
-        if wakeAttempts > 15 {
-            setStep(0, state: .failed)
-            showFailure(message: "\(host.name ?? "Your PC") didn't answer. Check that it's on, Sunshine is running, and Wake-on-LAN is enabled on the PC.")
-            return
-        }
-        // One silent server-info round trip per poll — the same
-        // activation the host page uses, minus pairing.
-        GPSessionController.shared().activateHost(host, userInitiated: false, skipFastPath: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self = self, !self.cancelled else { return }
-            self.refreshHost()
-            if self.host.state == .online {
-                self.setStep(0, state: .done)
-                self.stepStart()
+        // A-49: an absolute deadline, not a poll count; the failure
+        // copy only blames Wake-on-LAN when a wake could be sent.
+        let hostName = host.name ?? "Your PC"
+        let hasUsableMAC = !(host.mac ?? "").isEmpty && host.mac != "00:00:00:00:00:00"
+        waitForOnline(timeout: 30, onOnline: { [weak self] in
+            self?.setStep(0, state: .done)
+            self?.stepStart()
+        }, onTimeout: { [weak self] in
+            guard let self = self else { return }
+            self.setStep(0, state: .failed)
+            if hasUsableMAC {
+                self.showFailure(message: "\(hostName) didn't answer. Check that it's on, Sunshine is running, and Wake-on-LAN is enabled on the PC.")
             } else {
-                self.pollForWake()
+                self.showFailure(message: "\(hostName) didn't answer. Check that it's on and Sunshine is running.")
             }
-        }
+        })
     }
 
     private func stepStart() {
         guard !cancelled else { return }
+        phase = .starting
         setStep(1, state: .active)
         // One fresh server-info round trip so the running-game
         // state is current before we launch (upstream fetches it
-        // in its host-tap flow for the same reason).
-        GPSessionController.shared().activateHost(host, userInitiated: false, skipFastPath: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-            guard let self = self, !self.cancelled else { return }
-            self.refreshHost()
-            if self.host.state != .online {
-                self.setStep(1, state: .failed)
-                self.showFailure(message: "Lost contact with \(self.host.name ?? "your PC") while starting. Check the PC and your Wi-Fi, then try again.")
-                return
-            }
+        // in its host-tap flow for the same reason) — and the step
+        // advances on the host actually reporting online (A-12),
+        // failing only at the explicit timeout. The wait issues
+        // the activation itself (see checkWait).
+        waitForOnline(timeout: 15, onOnline: { [weak self] in
+            guard let self = self else { return }
             self.setStep(1, state: .done)
             self.stepNegotiate()
-        }
+        }, onTimeout: { [weak self] in
+            guard let self = self else { return }
+            self.setStep(1, state: .failed)
+            self.showFailure(message: "Lost contact with \(self.host.name ?? "your PC") while starting. Check the PC and your Wi-Fi, then try again.")
+        })
     }
 
     private func stepNegotiate() {
         guard !cancelled else { return }
+        phase = .finished
         setStep(2, state: .active)
+        // A-12: build the stream config from the host as the
+        // session holds it *now* — address, cert and codec support
+        // all come from app.host at build time.
+        refreshHost()
+        app.host = host
         let session = GPSessionController.shared()
         guard let streamVC = session.streamViewController(for: app) else {
             setStep(2, state: .failed)
@@ -269,8 +404,9 @@ final class GPConnectingViewController: GPBaseViewController {
         } else {
             setStep(3, state: .done)
         }
+        let generation = runGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let self = self, !self.cancelled else { return }
+            guard let self = self, !self.cancelled, generation == self.runGeneration else { return }
             self.launch(streamVC: streamVC)
         }
     }
@@ -278,6 +414,9 @@ final class GPConnectingViewController: GPBaseViewController {
     private func launch(streamVC: UIViewController) {
         launched = true
         let settings = DataManager().getSettings()
+        // A-43: the stats session starts at the last responsible
+        // moment — immediately before the stream is handed over —
+        // so negotiation time is never counted as playtime.
         GPStats.shared.beginSession(appKey: GPCatalog.appKey(host: host, app: app),
                                     appName: app.name ?? "Game",
                                     bitrateKbps: settings?.bitrate?.intValue ?? 20000)

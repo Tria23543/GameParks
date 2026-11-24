@@ -68,25 +68,55 @@ enum GPCatalog {
             return GPGameInfo(coverImageName: "cover_vicecity", isClassic: true,
                               sourceTag: "Your setup", detailLine: "Open world · Rockstar Games")
         }
+        // Core Design era (1996 original through Angel of Darkness).
         if norm == "tomb raider" || hasPhrase("tomb raider ii") || hasPhrase("tomb raider iii")
-            || hasPhrase("tomb raider the angel of darkness") || hasPhrase("tomb raider legend")
-            || hasPhrase("tomb raider anniversary") || hasPhrase("tomb raider underworld") {
+            || hasPhrase("tomb raider the last revelation") || hasPhrase("tomb raider chronicles")
+            || hasPhrase("tomb raider the angel of darkness") {
             return GPGameInfo(coverImageName: "cover_tombraider", isClassic: true,
                               sourceTag: "Your setup", detailLine: "Adventure · Core Design")
         }
-        if norm == "call of duty" || norm == "call of duty 2"
-            || hasPhrase("call of duty united offensive") {
+        // Crystal Dynamics era classics.
+        if hasPhrase("tomb raider legend") || hasPhrase("tomb raider anniversary")
+            || hasPhrase("tomb raider underworld") {
+            return GPGameInfo(coverImageName: "cover_tombraider", isClassic: true,
+                              sourceTag: "Your setup", detailLine: "Adventure · Crystal Dynamics")
+        }
+        // United Offensive is CoD 1's expansion (Gray Matter), so it
+        // shares the first game's cover; CoD 2 does not and falls
+        // through to the coverless generic CoD branch below.
+        if hasPhrase("call of duty united offensive") {
+            return GPGameInfo(coverImageName: "cover_cod", isClassic: true,
+                              sourceTag: "Your setup", detailLine: "WWII shooter · Gray Matter")
+        }
+        if norm == "call of duty" {
             return GPGameInfo(coverImageName: "cover_cod", isClassic: true,
                               sourceTag: "Your setup", detailLine: "WWII shooter · Infinity Ward")
         }
         if hasPhrase("most wanted") && (hasPhrase("need for speed") || hasPhrase("nfs")) {
-            return GPGameInfo(coverImageName: "cover_nfsmw", isClassic: true,
+            // The 2005 cover is earned only by a 2005-era marker in
+            // the name ("2005", "Black Edition"): a bare "Most
+            // Wanted" is just as likely the 2012 game, so it keeps
+            // the classic treatment but gets no bundled cover rather
+            // than the wrong game's art.
+            if hasPhrase("2005") || hasPhrase("black edition") {
+                return GPGameInfo(coverImageName: "cover_nfsmw", isClassic: true,
+                                  sourceTag: "Your setup", detailLine: "Racing · Electronic Arts")
+            }
+            return GPGameInfo(coverImageName: nil, isClassic: true,
                               sourceTag: "Your setup", detailLine: "Racing · Electronic Arts")
         }
 
         // --- Big games (Steam shelf) ---
 
-        if tokens == ["grand", "theft", "auto", "v"] || tokens == ["gta", "v"]
+        // Exclusions ahead of the GTA V prefix rules: San Andreas
+        // and IV must never be read as V (Vice City is already
+        // handled by the classics rule above).
+        if hasPhrase("san andreas") || tokens == ["grand", "theft", "auto", "iv"]
+            || tokens == ["gta", "iv"] || norm == "grand theft auto 4" || norm == "gta4" {
+            return GPGameInfo(coverImageName: nil, isClassic: false,
+                              sourceTag: "Steam", detailLine: "Open world · Rockstar Games")
+        }
+        if tokens.starts(with: ["grand", "theft", "auto", "v"]) || tokens.starts(with: ["gta", "v"])
             || norm == "grand theft auto 5" || norm == "gta5" || norm == "gtav" {
             return GPGameInfo(coverImageName: "cover_gta5", isClassic: false,
                               sourceTag: "Steam", detailLine: "Open world · Rockstar Games")
@@ -100,11 +130,22 @@ enum GPCatalog {
                               sourceTag: "Steam", detailLine: "Story-driven · Naughty Dog")
         }
         if hasPhrase("mafia") {
-            if hasPhrase("mafia ii") || hasPhrase("mafia 2") {
+            // cover_mafia is The Old Country's key art — only that
+            // game may use it; every other Mafia title gets no
+            // bundled cover rather than the wrong game's poster.
+            if hasPhrase("old country") {
                 return GPGameInfo(coverImageName: "cover_mafia", isClassic: false,
+                                  sourceTag: "Steam", detailLine: "Crime saga · Hangar 13")
+            }
+            if hasPhrase("mafia ii") || hasPhrase("mafia 2") {
+                return GPGameInfo(coverImageName: nil, isClassic: false,
                                   sourceTag: "Steam", detailLine: "Crime saga · 2K Czech")
             }
-            return GPGameInfo(coverImageName: "cover_mafia", isClassic: false,
+            if norm == "mafia" || hasPhrase("city of lost heaven") {
+                return GPGameInfo(coverImageName: nil, isClassic: false,
+                                  sourceTag: "Steam", detailLine: "Crime saga · Illusion Softworks")
+            }
+            return GPGameInfo(coverImageName: nil, isClassic: false,
                               sourceTag: "Steam", detailLine: "Crime saga · Hangar 13")
         }
         if hasPhrase("rise of the tomb raider") || hasPhrase("shadow of the tomb raider") {
@@ -113,6 +154,12 @@ enum GPCatalog {
         }
         if hasPhrase("the last of us part ii") || hasPhrase("the last of us part 2") {
             return GPGameInfo(coverImageName: nil, isClassic: false,
+                              sourceTag: "Steam", detailLine: "Story-driven · Naughty Dog")
+        }
+        // Plain / Remastered Last of Us — the same game Part I
+        // remakes, so it shares that cover. Ordered after Part II.
+        if norm == "the last of us" || hasPhrase("the last of us remastered") {
+            return GPGameInfo(coverImageName: "cover_tlou", isClassic: false,
                               sourceTag: "Steam", detailLine: "Story-driven · Naughty Dog")
         }
         if hasPhrase("red dead redemption") {
@@ -155,13 +202,24 @@ enum GPCatalog {
 
     // MARK: - Host box art
 
-    private static let boxArtCache = NSCache<NSString, UIImage>()
-    private static let boxArtDecodeQueue = DispatchQueue(label: "com.gameparks.boxart", qos: .userInitiated)
-    /// Keys whose decode has been kicked off (main-thread confined:
-    /// coverImage is only ever called from screen rebuilds). A key
-    /// stays in the set after a failed decode so a bad file is not
-    /// retried on every rebuild.
+    private static let boxArtCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 48 * 1024 * 1024
+        return cache
+    }()
+    private static let boxArtDecodeQueue = DispatchQueue(label: "com.gameparks.boxart", qos: .userInitiated, attributes: .concurrent)
+    /// Keys whose decode is currently in flight (main-thread
+    /// confined: coverImage is only ever called from screen
+    /// rebuilds). A key is inserted when its decode starts and
+    /// removed when that decode completes, success or failure — so
+    /// an NSCache eviction or one failed decode can always be
+    /// retried by a later rebuild.
     private static var boxArtRequested = Set<NSString>()
+    /// The on-disk modification date each decoded entry was read
+    /// from (main-thread confined, like boxArtRequested). If the
+    /// file's date no longer matches, the entry is stale — the
+    /// host-side cover was replaced — and is dropped for a re-decode.
+    private static var boxArtFileDates: [NSString: Date] = [:]
 
     /// The decoded host box art for an app, or nil if it isn't
     /// decoded yet. The PNG itself is fetched from the host by
@@ -173,28 +231,57 @@ enum GPCatalog {
     /// screens and they pick the image up from the memory cache.
     static func hostBoxArt(for app: TemporaryApp) -> UIImage? {
         guard let uuid = app.host?.uuid, let appID = app.id else { return nil }
-        let key = "\(uuid)/\(appID)" as NSString
-        if let cached = boxArtCache.object(forKey: key) {
-            return cached
+        // The app name is part of the key (not just host UUID + app
+        // id): if Sunshine renumbers its app ids, a renamed app must
+        // not inherit the previous game's decoded cover.
+        let key = "\(uuid)/\(appID)/\(app.name ?? "")" as NSString
+        let path = AppAssetManager.boxArtPath(for: app)
+        let fileDate = path.flatMap { p in
+            (try? FileManager.default.attributesOfItem(atPath: p))?[.modificationDate] as? Date
         }
-        guard let path = AppAssetManager.boxArtPath(for: app),
+        if let cached = boxArtCache.object(forKey: key) {
+            if let recorded = boxArtFileDates[key], let current = fileDate, recorded == current {
+                return cached
+            }
+            // The file changed under the cached image (or its date
+            // is unknown): drop the stale entry and re-decode below.
+            boxArtCache.removeObject(forKey: key)
+            boxArtFileDates.removeValue(forKey: key)
+        }
+        guard let path = path,
               FileManager.default.fileExists(atPath: path),
               !boxArtRequested.contains(key) else { return nil }
         boxArtRequested.insert(key)
         let host = app.host
+        let decodedDate = fileDate
         boxArtDecodeQueue.async {
             var decoded: UIImage?
+            var cost = 0
             if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
                let image = UIImage(data: data) {
                 // Force the decode here, on this queue, by drawing
                 // the image once (the same trick upstream's
-                // loadBoxArtForCaching uses against scroll jank).
-                let renderer = UIGraphicsImageRenderer(size: image.size)
+                // loadBoxArtForCaching uses against scroll jank) —
+                // at scale 1, so the cached copy holds the source's
+                // pixels, not a 2–3× screen-scale rendering of them.
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
                 decoded = renderer.image { _ in image.draw(at: .zero) }
+                if let decoded = decoded {
+                    cost = Int(decoded.size.width * decoded.size.height * 4)
+                }
             }
-            guard let decoded = decoded else { return }
-            boxArtCache.setObject(decoded, forKey: key)
             DispatchQueue.main.async {
+                // The decode is no longer in flight, whatever its
+                // outcome: the key leaves the set so a failure (or a
+                // later cache eviction) can be retried on a rebuild.
+                boxArtRequested.remove(key)
+                guard let decoded = decoded else { return }
+                boxArtCache.setObject(decoded, forKey: key, cost: cost)
+                if let decodedDate = decodedDate {
+                    boxArtFileDates[key] = decodedDate
+                }
                 NotificationCenter.default.post(name: .GPAppListChanged, object: host)
             }
         }

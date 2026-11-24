@@ -34,6 +34,21 @@ import UIKit
 /// is cancelled inside it before the finger lifts. A stationary
 /// tap is delivered whole and fires exactly as it always did.
 final class GPScrollView: UIScrollView {
+    // A-28: the delay/cancel half of the scroll-safety guarantee is a
+    // property of this class, set in its initialisers — call sites no
+    // longer have to remember it.
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        delaysContentTouches = true
+        canCancelContentTouches = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        delaysContentTouches = true
+        canCancelContentTouches = true
+    }
+
     override func touchesShouldCancel(in contentView: UIView) -> Bool {
         return true
     }
@@ -102,7 +117,7 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
             back.addTarget(self, action: #selector(gpGoBack), for: .touchUpInside)
             var backConstraints: [NSLayoutConstraint] = []
             back.translatesAutoresizingMaskIntoConstraints = false
-            backConstraints.append(back.heightAnchor.constraint(greaterThanOrEqualToConstant: 36))
+            backConstraints.append(back.heightAnchor.constraint(greaterThanOrEqualToConstant: 44))
             container.addArrangedSubview(back)
             NSLayoutConstraint.activate(backConstraints)
         }
@@ -149,10 +164,11 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
                 self.presentAlert(title: "Invalid address", message: "Enter the PC's IP address, for example 192.168.1.100.")
                 return
             }
-            GPSessionController.shared().addHost(atAddress: address) { success, error in
+            GPSessionController.shared().addHost(atAddress: address) { [weak self] success, error in
+                guard let self = self else { return }
                 if !success {
                     self.presentAlert(title: "PC not found",
-                                      message: error ?? "No GameStream PC answered at that address. Check the address and that Sunshine is running.")
+                                      message: error ?? "No PC answered at that address. Check the address and that Sunshine is running.")
                 }
             }
         })
@@ -163,6 +179,12 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
 
     private var contentRebuildPending = false
     private var flushRecheckScheduled = false
+    /// A-30: when the current deferral began; a rebuild deferred
+    /// continuously for ~3 s flushes unconditionally.
+    private var deferralBeganAt: Date?
+    /// A-89: an offset restore is outstanding until the deferred
+    /// re-clamp has run.
+    private var restoreOutstanding = false
 
     /// Screens override this to (re)build their dynamic content.
     /// Notification handlers must not call it directly — they go
@@ -187,6 +209,7 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
     /// full teardown-and-layout pass.
     func requestContentRebuild() {
         if scrollBusy {
+            if deferralBeganAt == nil { deferralBeganAt = Date() }
             contentRebuildPending = true
             scheduleFlushRecheck()
             return
@@ -197,11 +220,35 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
     /// Rebuilds now, keeping the user's place: the scroll offset is
     /// restored afterwards (clamped to the new content size), so a
     /// background refresh never makes the page jump.
+    /// The deliberate-action path: callers that are NOT responding to
+    /// a background notification (an explicit user action, a deliberate
+    /// refresh) may call this directly. Notification handlers and
+    /// viewWillAppear go through requestContentRebuild() instead
+    /// (A-31), so a pending deferred rebuild is never discarded and a
+    /// rebuild never lands mid-gesture.
     func performContentRebuild() {
         contentRebuildPending = false
+        deferralBeganAt = nil
         let offsetY = scrollView.contentOffset.y
         rebuildContent()
         view.layoutIfNeeded()
+        // A-89: never fight a pull-to-refresh for the offset.
+        if scrollView.refreshControl?.isRefreshing == true { return }
+        clampScrollOffset(to: offsetY)
+        // A-89: content height can settle after this first pass
+        // (covers decoding into posters, labels re-wrapping), so
+        // schedule one deferred re-clamp while this restore is
+        // outstanding.
+        restoreOutstanding = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.restoreOutstanding else { return }
+            self.restoreOutstanding = false
+            self.view.layoutIfNeeded()
+            self.clampScrollOffset(to: offsetY)
+        }
+    }
+
+    private func clampScrollOffset(to offsetY: CGFloat) {
         let minY = -scrollView.adjustedContentInset.top
         let maxY = max(minY, scrollView.contentSize.height - scrollView.bounds.height
                        + scrollView.adjustedContentInset.bottom)
@@ -225,14 +272,27 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self else { return }
             self.flushRecheckScheduled = false
-            if self.contentRebuildPending && self.scrollBusy {
+            // A-30: a deferral deadline — after ~3 s of continuous
+            // deferral, flush unconditionally rather than polling
+            // (and showing stale content) forever.
+            let deadlinePassed = self.deferralBeganAt.map { Date().timeIntervalSince($0) >= 3.0 } ?? false
+            if self.contentRebuildPending && self.scrollBusy && !deadlinePassed {
                 self.scheduleFlushRecheck()
+            } else if deadlinePassed {
+                self.performContentRebuild()
             } else {
                 self.flushPendingContentRebuild()
             }
         }
     }
 
+    // A-88: deliberate coupling — these callbacks intentionally do
+    // NOT check which scroll view ended. Home assigns its horizontal
+    // rails' delegate to the same controller, and a rail ending is
+    // exactly what must flush a rail-deferred rebuild. Safety does
+    // not rest on the identity check: flushPendingContentRebuild()
+    // re-checks scrollBusy (page + supplementary rails) before
+    // rebuilding.
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         if !decelerate {
             flushPendingContentRebuild()
@@ -268,6 +328,18 @@ class GPGuardedSegmentedControl: UISegmentedControl {
 /// place to stop a scroll from reaching one is before delivery —
 /// which is what GPScrollView does.
 class GPGuardedStepper: UIStepper {
+    // A-29: non-continuous, so a value change is dispatched only on
+    // touch-up — which a scroll-cancelled touch never reaches. This
+    // closes the rest-then-scroll window GPScrollView alone leaves.
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isContinuous = false
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        isContinuous = false
+    }
 }
 
 /// Buttons: plain UIButton inside a GPScrollView.
@@ -305,6 +377,25 @@ func gpSecondaryButton(_ title: String) -> UIButton {
 /// A tappable panel card. Content goes into `stack`.
 final class GPCardButton: GPGuardedControl {
     let stack = UIStackView()
+    /// A-27: dedicated tap identity, so it no longer rides on
+    /// accessibilityIdentifier.
+    var appKey: String?
+
+    /// A-27: spoken label assembled from the card's visible labels.
+    override var accessibilityLabel: String? {
+        get {
+            let texts = Self.labelTexts(in: stack)
+            return texts.isEmpty ? nil : texts.joined(separator: ", ")
+        }
+        set { }
+    }
+
+    private static func labelTexts(in view: UIView) -> [String] {
+        var out: [String] = []
+        if let label = view as? UILabel, let text = label.text, !text.isEmpty { out.append(text) }
+        for sub in view.subviews { out += labelTexts(in: sub) }
+        return out
+    }
 
     init() {
         super.init(frame: .zero)
@@ -335,10 +426,23 @@ final class GPCardButton: GPGuardedControl {
 /// A tappable settings/list row: title, subtitle, optional value and
 /// chevron.
 final class GPRow: GPGuardedControl {
-    let titleLabel = gpLabel(nil, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+    let titleLabel = gpLabel(nil, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 2)
     let subtitleLabel = gpLabel(nil, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
     let valueLabel = gpLabel(nil, font: GPFont.body(14, weight: .semibold), color: GPColor.textSecondary, lines: 1)
     private let chevronLabel = gpLabel("›", font: GPFont.display(20, weight: .bold), color: GPColor.textFaint, lines: 1)
+    /// A-27: dedicated tap identity where a row represents an app.
+    var appKey: String?
+
+    /// A-27: spoken label/value from the visible title, subtitle
+    /// and value.
+    override var accessibilityLabel: String? {
+        get { [titleLabel.text, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ") }
+        set { }
+    }
+    override var accessibilityValue: String? {
+        get { valueLabel.text }
+        set { }
+    }
 
     init(showsChevron: Bool = true) {
         super.init(frame: .zero)
@@ -368,6 +472,11 @@ final class GPRow: GPGuardedControl {
             heightAnchor.constraint(greaterThanOrEqualToConstant: 56),
         ])
         subtitleLabel.isHidden = true
+        // A-82: the value wins truncation fights against the title.
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        valueLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        isAccessibilityElement = true
+        accessibilityTraits = [.button]
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -375,7 +484,7 @@ final class GPRow: GPGuardedControl {
     var subtitle: String? {
         didSet {
             subtitleLabel.text = subtitle
-            subtitleLabel.isHidden = (subtitle == nil || subtitle!.isEmpty)
+            subtitleLabel.isHidden = subtitle?.isEmpty ?? true
         }
     }
 
@@ -391,6 +500,17 @@ final class GPSwitchRow: GPGuardedControl {
     let subtitleLabel = gpLabel(nil, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
     let toggle = UISwitch()
     var onToggle: ((Bool) -> Void)?
+
+    /// A-27: the row itself is the accessibility element; the
+    /// display-only switch's state is spoken as the row's value.
+    override var accessibilityLabel: String? {
+        get { [titleLabel.text, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ") }
+        set { }
+    }
+    override var accessibilityValue: String? {
+        get { isOn ? "On" : "Off" }
+        set { }
+    }
 
     init() {
         super.init(frame: .zero)
@@ -420,6 +540,8 @@ final class GPSwitchRow: GPGuardedControl {
             heightAnchor.constraint(greaterThanOrEqualToConstant: 56),
         ])
         subtitleLabel.isHidden = true
+        isAccessibilityElement = true
+        accessibilityTraits = [.button]
         addTarget(self, action: #selector(rowTapped), for: .touchUpInside)
     }
 
@@ -428,7 +550,7 @@ final class GPSwitchRow: GPGuardedControl {
     var subtitle: String? {
         didSet {
             subtitleLabel.text = subtitle
-            subtitleLabel.isHidden = (subtitle == nil || subtitle!.isEmpty)
+            subtitleLabel.isHidden = subtitle?.isEmpty ?? true
         }
     }
 
@@ -465,6 +587,9 @@ func gpSectionHeader(_ title: String, subtitle: String? = nil) -> UIView {
 /// A game poster: bundled cover art when we have it, otherwise a
 /// title tile in the design's panel tone. Fixed 2:3-ish art area.
 final class GPPosterView: GPGuardedControl {
+    /// A-27: dedicated tap identity (accessibilityIdentifier is
+    /// still set by callers for compatibility, but handlers read this).
+    var appKey: String?
     private let artContainer = UIView()
     private let imageView = UIImageView()
     private let tileLabel = gpLabel(nil, font: GPFont.display(15, weight: .bold), color: GPColor.textPrimary, lines: 3)
@@ -515,7 +640,10 @@ final class GPPosterView: GPGuardedControl {
     func configure(name: String, subtitle: String?, cover: UIImage?) {
         nameLabel.text = name
         subtitleLabel.text = subtitle
-        subtitleLabel.isHidden = (subtitle == nil)
+        subtitleLabel.isHidden = subtitle?.isEmpty ?? true
+        accessibilityLabel = [name, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+        isAccessibilityElement = true
+        accessibilityTraits = [.button]
         if let cover = cover {
             imageView.image = cover
             imageView.isHidden = false
@@ -536,10 +664,11 @@ final class GPPosterView: GPGuardedControl {
 /// A horizontal app row for lists: small art, name, source line,
 /// chevron.
 final class GPAppRow: GPGuardedControl {
+    /// A-27: dedicated tap identity (see GPPosterView).
+    var appKey: String?
     private let imageView = UIImageView()
-    private let tileView = UIView()
     private let tileLabel = gpLabel(nil, font: GPFont.display(11, weight: .bold), color: GPColor.textPrimary, lines: 2)
-    let nameLabel = gpLabel(nil, font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+    let nameLabel = gpLabel(nil, font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 2)
     let subtitleLabel = gpLabel(nil, font: GPFont.body(12), color: GPColor.textSecondary, lines: 1)
 
     init() {
@@ -589,7 +718,6 @@ final class GPAppRow: GPGuardedControl {
             tileLabel.leadingAnchor.constraint(equalTo: art.leadingAnchor, constant: 3),
             tileLabel.trailingAnchor.constraint(equalTo: art.trailingAnchor, constant: -3),
         ])
-        tileView.isHidden = true
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -597,6 +725,10 @@ final class GPAppRow: GPGuardedControl {
     func configure(name: String, subtitle: String?, cover: UIImage?) {
         nameLabel.text = name
         subtitleLabel.text = subtitle
+        subtitleLabel.isHidden = subtitle?.isEmpty ?? true
+        accessibilityLabel = [name, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+        isAccessibilityElement = true
+        accessibilityTraits = [.button]
         if let cover = cover {
             imageView.image = cover
             imageView.isHidden = false
@@ -625,14 +757,21 @@ final class GPChipButton: GPGuardedButton {
         super.init(frame: .zero)
         setTitle(title, for: .normal)
         titleLabel?.font = GPFont.body(13, weight: .semibold)
-        layer.cornerRadius = 16
-        contentEdgeInsets = UIEdgeInsets(top: 7, left: 14, bottom: 7, right: 14)
+        layer.cornerRadius = 22
+        contentEdgeInsets = UIEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
         refreshStyle()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func refreshStyle() {
+        // A-27: selection is state, not just colour.
+        isSelected = chipSelected
+        if chipSelected {
+            accessibilityTraits.insert(.selected)
+        } else {
+            accessibilityTraits.remove(.selected)
+        }
         if chipSelected {
             backgroundColor = GPColor.accent
             setTitleColor(GPColor.onAccent, for: .normal)
@@ -650,12 +789,16 @@ final class GPChipButton: GPGuardedButton {
 final class GPMessageView: UIView {
     let titleLabel = gpLabel(nil, font: GPFont.display(17, weight: .bold), color: GPColor.textPrimary, lines: 0)
     let messageLabel = gpLabel(nil, font: GPFont.body(14), color: GPColor.textSecondary, lines: 0)
-    let actionButton = gpSecondaryButton("Retry")
+    // A-110: no default action title — a caller that wants a button
+    // passes an explicit title to configure(...); with none, the
+    // button stays hidden instead of offering a misleading "Retry".
+    let actionButton = gpSecondaryButton("")
 
     init() {
         super.init(frame: .zero)
         backgroundColor = GPColor.panel
         layer.cornerRadius = 20
+        actionButton.isHidden = true
         let stack = UIStackView(arrangedSubviews: [titleLabel, messageLabel, actionButton])
         stack.axis = .vertical
         stack.spacing = 10

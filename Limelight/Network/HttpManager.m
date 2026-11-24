@@ -11,6 +11,7 @@
 #import "CryptoManager.h"
 #import "TemporaryApp.h"
 #import "ServerInfoResponse.h"
+#import "AppAssetResponse.h"
 
 #include <libxml2/libxml/xmlreader.h>
 #include <string.h>
@@ -118,6 +119,8 @@
 
     __block NSData* requestResp = nil;
     __block NSError* respError = nil;
+    __block NSInteger httpStatusCode = -1;
+    __block NSString* httpStatusMessage = nil;
     __block dispatch_semaphore_t requestLock = dispatch_semaphore_create(0);
     
     Log(LOG_D, @"Making Request: %@", request);
@@ -129,6 +132,10 @@
             respError = error;
         }
         else {
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                httpStatusCode = [(NSHTTPURLResponse*)response statusCode];
+                httpStatusMessage = [NSHTTPURLResponse localizedStringForStatusCode:httpStatusCode];
+            }
             Log(LOG_D, @"Received response: %@", response);
 
             if (data != NULL) {
@@ -149,6 +156,15 @@
     
     if (!respError && request.response) {
         [request.response populateWithData:requestResp];
+
+        // GP v2.5 (A-02): AppAssetResponse's body is binary, so its
+        // status can only come from the HTTP response itself. Populate
+        // it here so the retriever can refuse non-200 bodies instead of
+        // caching an error page as box art.
+        if ([request.response isKindOfClass:[AppAssetResponse class]] && httpStatusCode != -1) {
+            request.response.statusCode = httpStatusCode;
+            request.response.statusMessage = httpStatusMessage;
+        }
         
         // If the fallback error code was detected, issue the fallback request
         if (request.response.statusCode == request.fallbackError && request.fallbackRequest != NULL) {

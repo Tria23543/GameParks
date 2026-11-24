@@ -15,12 +15,22 @@ final class GPHostViewController: GPBaseViewController {
     private var session: GPSessionController { GPSessionController.shared() }
 
     private let hostUUID: String
+    private let hostName: String
     private var host: TemporaryHost
     private let dynamicStack = UIStackView()
+    /// A-76: header labels, refreshed in rebuildContent.
+    private var headerTitleLabel: UILabel?
+    private var headerSubtitleLabel: UILabel?
+    /// A-24: set once re-resolution has failed; the page then shows
+    /// a not-available state instead of stale content.
+    private var hostUnavailable = false
+    /// A-79: Reconnect feedback, cleared on the next state change.
+    private var reconnectInProgress = false
 
     init(host: TemporaryHost) {
         self.host = host
         self.hostUUID = host.uuid ?? ""
+        self.hostName = host.name ?? ""
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -28,8 +38,12 @@ final class GPHostViewController: GPBaseViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        contentStack.addArrangedSubview(makeHeader(title: host.name ?? "Your PC",
-                                                   subtitle: "Your host", showsBack: true))
+        let header = makeHeader(title: host.name ?? "Your PC",
+                                subtitle: "Your host", showsBack: true)
+        let headerLabels = (header as? UIStackView)?.arrangedSubviews.compactMap { $0 as? UILabel } ?? []
+        headerTitleLabel = headerLabels.first
+        headerSubtitleLabel = headerLabels.dropFirst().first
+        contentStack.addArrangedSubview(header)
         dynamicStack.axis = .vertical
         dynamicStack.spacing = 16
         contentStack.addArrangedSubview(dynamicStack)
@@ -40,7 +54,20 @@ final class GPHostViewController: GPBaseViewController {
                                                name: .GPAppListChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(hostInfoError(_:)),
                                                name: .GPHostInfoError, object: nil)
+        // A-80: keep the controller row honest while on this page.
+        NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged),
+                                               name: .GCControllerDidConnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(controllerChanged),
+                                               name: .GCControllerDidDisconnect, object: nil)
         rebuildContent()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func controllerChanged() {
+        requestContentRebuild()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -52,8 +79,21 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func stateChanged() {
-        if let current = GPSessionController.shared().hosts.first(where: { $0.uuid == hostUUID }) {
+        reconnectInProgress = false
+        // A-77: a nil/empty UUID is unmatchable by UUID — fall back
+        // to the host's name rather than never matching.
+        let hosts = GPSessionController.shared().hosts
+        if let current = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
+            ?? (hostUUID.isEmpty ? hosts.first(where: { $0.name == hostName }) : nil) {
             host = current
+        } else if !hostUnavailable {
+            // A-24: the host is gone. Pop if this page is topmost;
+            // otherwise show a not-available state (rebuildContent).
+            hostUnavailable = true
+            if navigationController?.topViewController === self {
+                navigationController?.popViewController(animated: true)
+                return
+            }
         }
         requestContentRebuild()
     }
@@ -73,6 +113,19 @@ final class GPHostViewController: GPBaseViewController {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let session = GPSessionController.shared()
 
+        // A-76: header follows the freshest host object.
+        headerTitleLabel?.text = host.name ?? "Your PC"
+
+        if hostUnavailable {
+            let message = GPMessageView()
+            message.configure(title: "This PC is no longer available",
+                              message: "It was removed or is no longer known to GameParks.",
+                              actionTitle: "Back")
+            message.actionButton.addTarget(self, action: #selector(gpGoBack), for: .touchUpInside)
+            dynamicStack.addArrangedSubview(message)
+            return
+        }
+
         // Status card
         let statusCard = GPCardButton()
         statusCard.isUserInteractionEnabled = false
@@ -91,8 +144,8 @@ final class GPHostViewController: GPBaseViewController {
             statusLine = "Connecting…"
             detailLine = "Checking this PC"
         }
-        statusCard.stack.addArrangedSubview(gpLabel(statusLine, font: GPFont.display(20, weight: .extrabold), color: GPColor.textPrimary, lines: 1))
-        statusCard.stack.addArrangedSubview(gpLabel(detailLine, font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
+        statusCard.stack.addArrangedSubview(gpLabel(statusLine, font: GPFont.display(20, weight: .extrabold), color: GPColor.textPrimary, lines: 2))
+        statusCard.stack.addArrangedSubview(gpLabel(detailLine, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2))
         if host.state == .online, session.lastPingMs(for: host) >= 0 {
             statusCard.stack.addArrangedSubview(gpLabel("\(session.lastPingMs(for: host)) ms", font: GPFont.body(12, weight: .semibold), color: GPColor.accent, lines: 1))
         }
@@ -104,7 +157,9 @@ final class GPHostViewController: GPBaseViewController {
             pairButton.addTarget(self, action: #selector(pairTapped), for: .touchUpInside)
             dynamicStack.addArrangedSubview(pairButton)
         }
-        if host.state != .online {
+        // A-79: Wake is offered only when the PC is actually offline
+        // — not while it is mid-handshake ("Connecting…").
+        if host.state == .offline {
             if host.mac != nil && host.mac != "00:00:00:00:00:00" {
                 let wakeButton = gpPrimaryButton("Wake PC")
                 wakeButton.addTarget(self, action: #selector(wakeTapped), for: .touchUpInside)
@@ -114,7 +169,7 @@ final class GPHostViewController: GPBaseViewController {
             } else {
                 let note = GPMessageView()
                 note.configure(title: "Wake isn't available",
-                               message: "This PC never reported its network (MAC) address, so a wake-up packet can't be addressed to it. It will appear here by itself when it's on.",
+                               message: "This PC never reported its MAC address, so a wake-up packet can't be addressed to it. It will appear here by itself when it's on.",
                                actionTitle: nil)
                 dynamicStack.addArrangedSubview(note)
             }
@@ -129,7 +184,15 @@ final class GPHostViewController: GPBaseViewController {
 
         let connectionRow = GPRow(showsChevron: false)
         connectionRow.titleLabel.text = "Connection"
-        connectionRow.subtitle = "Home Wi-Fi · same network"
+        // A-48: claim "same network" only when the address in use is
+        // the host's local address; otherwise stay neutral.
+        if let active = host.activeAddress, let local = host.localAddress, active == local {
+            connectionRow.subtitle = "Home Wi-Fi · same network"
+        } else if host.activeAddress != nil {
+            connectionRow.subtitle = "Remote connection"
+        } else {
+            connectionRow.subtitle = "Online · Sunshine ready"
+        }
         connectionRow.valueLabel.text = session.lastPingMs(for: host) >= 0
             ? "\(session.lastPingMs(for: host)) ms" : "—"
         dynamicStack.addArrangedSubview(connectionRow)
@@ -153,12 +216,16 @@ final class GPHostViewController: GPBaseViewController {
         let reconnectRow = GPRow()
         reconnectRow.titleLabel.text = "Reconnect to Sunshine"
         reconnectRow.subtitle = "If a stream ever misbehaves"
+        if reconnectInProgress {
+            reconnectRow.valueLabel.text = "Reconnecting…"
+            reconnectRow.isEnabled = false
+        }
         reconnectRow.addTarget(self, action: #selector(reconnectTapped), for: .touchUpInside)
         dynamicStack.addArrangedSubview(reconnectRow)
 
-        let addGameRow = GPRow()
+        let addGameRow = GPRow(showsChevron: false)
         addGameRow.titleLabel.text = "Add a game"
-        addGameRow.subtitle = "Point at any .exe — Steam not required"
+        addGameRow.subtitle = "Games are added on the PC, in Sunshine"
         addGameRow.addTarget(self, action: #selector(addGameTapped), for: .touchUpInside)
         dynamicStack.addArrangedSubview(addGameRow)
 
@@ -190,6 +257,7 @@ final class GPHostViewController: GPBaseViewController {
                                   subtitle: GPCatalog.info(for: app).sourceTag,
                                   cover: GPCatalog.coverImage(for: app))
                     row.accessibilityIdentifier = GPCatalog.appKey(host: host, app: app)
+                    row.appKey = GPCatalog.appKey(host: host, app: app)
                     row.addTarget(self, action: #selector(appRowTapped(_:)), for: .touchUpInside)
                     dynamicStack.addArrangedSubview(row)
                 }
@@ -211,6 +279,10 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func reconnectTapped() {
+        // A-79: visible in-progress feedback until the next
+        // stateChanged rebuild clears it.
+        reconnectInProgress = true
+        requestContentRebuild()
         GPSessionController.shared().activateHost(host, userInitiated: true, skipFastPath: true)
     }
 
@@ -233,6 +305,8 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func gamesRowTapped() {
+        // A-25: show THIS host's games — select it first.
+        GPSessionController.shared().selectHost(host)
         // The tab bar is the navigation stack's root, not an
         // ancestor of this pushed screen — reach it through the stack.
         if let tabBar = navigationController?.viewControllers.first as? GPTabBarController {
@@ -242,7 +316,7 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func appRowTapped(_ sender: GPAppRow) {
-        guard let key = sender.accessibilityIdentifier,
+        guard let key = sender.appKey,
               let app = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.appKey(host: host, app: $0) == key })
         else { return }
         navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)

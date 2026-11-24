@@ -21,7 +21,16 @@ final class GPPairingViewController: UIViewController {
     private let messageLabel = gpLabel(nil, font: GPFont.body(14), color: GPColor.textSecondary, lines: 0)
     private let cancelButton = gpSecondaryButton("Cancel")
     private let closeButton = gpPrimaryButton("Done")
+    private let tryAgainButton = gpPrimaryButton("Try again")
     private var finished = false
+    // A-35: pairing is kicked off on the first appearance only.
+    private var didStartPairing = false
+    // A-51: whatever callbacks were installed before this sheet,
+    // restored on dismissal instead of being nil-ed out.
+    private var savedOnPairingPIN: ((String) -> Void)?
+    private var savedOnPairingResult: ((Bool, String?) -> Void)?
+    // A-52: the displayed PIN does not wait forever.
+    private var pinTimeoutWorkItem: DispatchWorkItem?
 
     init(host: TemporaryHost) {
         self.host = host
@@ -55,8 +64,10 @@ final class GPPairingViewController: UIViewController {
 
         cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+        tryAgainButton.addTarget(self, action: #selector(tryAgainTapped), for: .touchUpInside)
+        tryAgainButton.isHidden = true
 
-        let stack = UIStackView(arrangedSubviews: [titleLabel, spinner, pinLabel, messageLabel, cancelButton, closeButton])
+        let stack = UIStackView(arrangedSubviews: [titleLabel, spinner, pinLabel, messageLabel, cancelButton, closeButton, tryAgainButton])
         stack.axis = .vertical
         stack.spacing = 14
         stack.alignment = .center
@@ -73,9 +84,12 @@ final class GPPairingViewController: UIViewController {
             stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -24),
             cancelButton.widthAnchor.constraint(equalTo: stack.widthAnchor),
             closeButton.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            tryAgainButton.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
 
         let session = GPSessionController.shared()
+        savedOnPairingPIN = session.onPairingPIN
+        savedOnPairingResult = session.onPairingResult
         session.onPairingPIN = { [weak self] pin in
             self?.showPIN(pin)
         }
@@ -114,6 +128,8 @@ final class GPPairingViewController: UIViewController {
         super.viewDidAppear(animated)
         // Kick the flow off only once we're on screen, so the PIN
         // (delivered synchronously by the engine) has somewhere to go.
+        guard !didStartPairing else { return }
+        didStartPairing = true
         GPSessionController.shared().pairSelectedHost()
     }
 
@@ -123,16 +139,41 @@ final class GPPairingViewController: UIViewController {
         spinner.isHidden = true
         pinLabel.text = pin
         pinLabel.isHidden = false
+        tryAgainButton.isHidden = true
         messageLabel.text = "Enter this PIN in the Sunshine web UI on your PC. Pairing finishes by itself once you do."
+        // A-52: if nothing comes back, say so and offer a retry.
+        pinTimeoutWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.finished, !self.pinLabel.isHidden else { return }
+            self.pinLabel.isHidden = true
+            self.messageLabel.text = "No response from the PC — check the PIN was accepted, then try again."
+            self.tryAgainButton.isHidden = false
+        }
+        pinTimeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: workItem)
+    }
+
+    @objc private func tryAgainTapped() {
+        pinTimeoutWorkItem?.cancel()
+        pinTimeoutWorkItem = nil
+        tryAgainButton.isHidden = true
+        pinLabel.isHidden = true
+        messageLabel.text = "Contacting your PC…"
+        spinner.isHidden = false
+        spinner.startAnimating()
+        GPSessionController.shared().pairSelectedHost()
     }
 
     private func showResult(success: Bool, message: String?) {
         guard !finished else { return }
         finished = true
+        pinTimeoutWorkItem?.cancel()
+        pinTimeoutWorkItem = nil
         spinner.stopAnimating()
         spinner.isHidden = true
         pinLabel.isHidden = true
         cancelButton.isHidden = true
+        tryAgainButton.isHidden = true
         closeButton.isHidden = false
         if success {
             titleLabel.text = "Paired"
@@ -153,9 +194,14 @@ final class GPPairingViewController: UIViewController {
     }
 
     private func cleanupAndDismiss() {
+        // A-52: observers and the PIN timeout end with the sheet.
+        NotificationCenter.default.removeObserver(self)
+        pinTimeoutWorkItem?.cancel()
+        pinTimeoutWorkItem = nil
+        // A-51: hand the callback slots back to whoever had them.
         let session = GPSessionController.shared()
-        session.onPairingPIN = nil
-        session.onPairingResult = nil
+        session.onPairingPIN = savedOnPairingPIN
+        session.onPairingResult = savedOnPairingResult
         dismiss(animated: true)
     }
 }

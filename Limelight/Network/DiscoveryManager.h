@@ -27,5 +27,10 @@
 - (void) pauseDiscoveryForHost:(TemporaryHost *)host;
 - (void) resumeDiscoveryForHost:(TemporaryHost *)host;
 - (void) discoverHost:(NSString*)hostAddress withCallback:(void (^)(TemporaryHost*, NSString*))callback;
+// GP v2.5 (A-57): token-aware variant. shouldAddToDiscovery is consulted
+// immediately before the host would be added to the discovery queue; if
+// it returns NO, the add (and its updateAllHosts side effect) is skipped
+// and the callback receives (nil, @"Discovery superseded").
+- (void) discoverHost:(NSString*)hostAddress withCallback:(void (^)(TemporaryHost*, NSString*))callback shouldAddToDiscovery:(nullable BOOL (^)(void))shouldAddToDiscovery;
 
 @end

@@ -3,20 +3,16 @@
 //
 
 // GameParks front-end: engine surface exposed to Swift.
+// A-85: trimmed to the headers whose types Swift actually
+// references (TemporaryHost/TemporaryApp/TemporarySettings via
+// DataManager, DiscoveryManager for GPSubnetScanner, AppAssetManager
+// for GPCatalog's box-art path, and the GPSessionController facade).
+// The low-level HTTP/crypto/identity/pairing primitives are no
+// longer exposed to Swift; the facade owns them.
 #import "DataManager.h"
 #import "TemporaryHost.h"
 #import "TemporaryApp.h"
 #import "TemporarySettings.h"
 #import "DiscoveryManager.h"
-#import "PairManager.h"
-#import "HttpManager.h"
-#import "HttpRequest.h"
-#import "HttpResponse.h"
-#import "ServerInfoResponse.h"
-#import "AppListResponse.h"
-#import "ConnectionHelper.h"
 #import "AppAssetManager.h"
-#import "WakeOnLanManager.h"
-#import "CryptoManager.h"
-#import "IdManager.h"
 #import "GPSessionController.h"

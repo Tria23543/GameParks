@@ -42,6 +42,26 @@ NSNotificationName const GPHostInfoErrorNotification = @"GPHostInfoError";
 NSString * const GPHostInfoErrorMessageKey = @"message";
 
 @interface GPSessionController () <DiscoveryCallback, PairCallback, AppAssetCallback>
+- (void)startPairing:(NSString *)PIN generation:(NSUInteger)generation;
+- (void)pairSuccessful:(NSData *)serverCert generation:(NSUInteger)generation;
+- (void)pairFailed:(NSString *)message generation:(NSUInteger)generation;
+- (void)alreadyPairedWithGeneration:(NSUInteger)generation;
+@end
+
+// GP v2.5 (A-13): PairManager's callbacks carry no sender, so each
+// pairing attempt gets its own callback proxy stamped with that
+// attempt's generation. A stale operation's callbacks are dropped by
+// the session before they can touch current pairing state.
+@interface GPGenerationPairCallback : NSObject <PairCallback>
+@property (nonatomic, weak) GPSessionController *session;
+@property (nonatomic) NSUInteger generation;
+@end
+
+@implementation GPGenerationPairCallback
+- (void)startPairing:(NSString *)PIN { [self.session startPairing:PIN generation:self.generation]; }
+- (void)pairSuccessful:(NSData *)serverCert { [self.session pairSuccessful:serverCert generation:self.generation]; }
+- (void)pairFailed:(NSString *)message { [self.session pairFailed:message generation:self.generation]; }
+- (void)alreadyPaired { [self.session alreadyPairedWithGeneration:self.generation]; }
 @end
 
 @implementation GPSessionController {
@@ -64,6 +84,22 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 
     AppAssetManager *_assetManager;
     BOOL _assetRefreshScheduled;
+    TemporaryHost *_assetRefreshHost;
+
+    // GP v2.5 (A-11): in-flight coalescing, keyed by host UUID.
+    NSMutableSet<NSString *> *_activationInFlight;
+    NSMutableSet<NSString *> *_fetchInFlight;
+    // GP v2.5 (A-55/A-10): per-host generation, bumped when a host is
+    // removed so stale waits/failures can recognise themselves.
+    NSMutableDictionary<NSString *, NSNumber *> *_hostGenerations;
+
+    // GP v2.5 (A-13/A-54): pairing generation + current operation.
+    NSUInteger _pairingGeneration;
+    PairManager *_currentPairManager;
+
+    // GP v2.5 (A-60): scan generation, so a cancelled sweep's late
+    // completion cannot clear a newer sweep's in-progress flag.
+    NSUInteger _scanGeneration;
 
     BOOL _started;
     BOOL _streamActive;
@@ -84,6 +120,9 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         _hosts = @[];
         _appListErrors = [NSMutableDictionary dictionary];
         _pingSamplesMs = [NSMutableDictionary dictionary];
+        _activationInFlight = [NSMutableSet set];
+        _fetchInFlight = [NSMutableSet set];
+        _hostGenerations = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -161,6 +200,70 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     }
 }
 
+#pragma mark - GP v2.5 coalescing / generation helpers
+
+- (NSString *)hostKeyForHost:(TemporaryHost *)host {
+    return host.uuid ?: [NSString stringWithFormat:@"%p", host];
+}
+
+- (NSUInteger)generationForHostKey:(NSString *)key {
+    @synchronized (_hostGenerations) {
+        return [_hostGenerations[key] unsignedIntegerValue];
+    }
+}
+
+- (NSUInteger)bumpGenerationForHostKey:(NSString *)key {
+    @synchronized (_hostGenerations) {
+        NSUInteger generation = [_hostGenerations[key] unsignedIntegerValue] + 1;
+        _hostGenerations[key] = @(generation);
+        return generation;
+    }
+}
+
+- (void)endActivationForKey:(NSString *)key {
+    @synchronized (_activationInFlight) {
+        [_activationInFlight removeObject:key];
+    }
+}
+
+/// GP v2.5 (A-55): a failure may only be applied when nothing has
+/// superseded it — the operation's generation is still current (the
+/// host was not removed mid-flight) and the host is still known or
+/// selected. Concurrent same-host operations are already coalesced
+/// (A-11), so a late failure cannot race a concurrent success for
+/// the same host through these paths.
+- (BOOL)failureIsCurrentForHost:(TemporaryHost *)host generation:(NSUInteger)generation key:(NSString *)key {
+    if ([self generationForHostKey:key] != generation) {
+        return NO;
+    }
+    return [self hostWithUUID:host.uuid] != nil || host == _selectedHost;
+}
+
+/// GP v2.5 (A-63): fetch box art for any app of this host that lacks
+/// a file, stopping any queued retrieval first (A-56).
+- (void)retrieveMissingAssetsForHost:(TemporaryHost *)host {
+    if (host == nil || _assetManager == nil) {
+        return;
+    }
+    for (TemporaryApp *app in host.appList) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:[AppAssetManager boxArtPathForApp:app]]) {
+            [_assetManager stopRetrieving];
+            [_assetManager retrieveAssetsFromHost:host];
+            return;
+        }
+    }
+}
+
+/// GP v2.5 (A-60): cancelling a sweep clears the session's
+/// in-progress flag synchronously; the scanner's group completion
+/// may land seconds later and must not gate the next foreground scan.
+- (void)cancelScanSynchronously {
+    _scanGeneration += 1;
+    [_scanner cancel];
+    _scanInProgress = NO;
+    _lastScanStart = nil;
+}
+
 /// Writes Glenda's settled defaults (1080p, 60 fps, 20 Mb/s, codec
 /// Auto, stats overlay on) only when the database still holds the
 /// engine's factory defaults and no earlier GameParks version has
@@ -176,6 +279,13 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         && [current.width intValue] == 1280
         && [current.height intValue] == 720;
     if (!factoryDefaults) {
+        return;
+    }
+    // GP v2.5 (A-61): factory-valued settings in a profile that
+    // already has saved hosts are a pre-GameParks user's deliberate
+    // choice, not a fresh install — leave them, and never revisit.
+    if ([dataMan getHosts].count > 0) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPSeededSettingsV1"];
         return;
     }
     [dataMan saveSettingsWithBitrate:20000
@@ -194,6 +304,9 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                       btMouseSupport:NO
                    absoluteTouchMode:NO
                         statsOverlay:YES];
+    // GP v2.5 (A-38): GameParks itself wrote the OSC value above;
+    // record that provenance for the OSC migration.
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPGameParksWroteOscV25"];
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPSeededSettingsV1"];
 }
 
@@ -213,11 +326,20 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"GPMigratedOscAutoV21"]) {
         return;
     }
-    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPMigratedOscAutoV21"];
-
+    // GP v2.5 (A-19): the done-flag is written only AFTER the record
+    // has been inspected and any rewrite saved (below, and in the
+    // early exits once inspection has happened).
     DataManager *dataMan = [[DataManager alloc] init];
     TemporarySettings *current = [dataMan getSettings];
     if (current == nil || [current.onscreenControls intValue] != 2) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPMigratedOscAutoV21"];
+        return;
+    }
+    // GP v2.5 (A-38): a stored 2 can also be a deliberate Simple
+    // choice made in upstream's settings screen. Migrate only when a
+    // GameParks-provenance marker proves GameParks wrote the value.
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"GPGameParksWroteOscV25"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPMigratedOscAutoV21"];
         return;
     }
     [dataMan saveSettingsWithBitrate:[current.bitrate intValue]
@@ -236,6 +358,8 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                       btMouseSupport:current.btMouseSupport
                    absoluteTouchMode:current.absoluteTouchMode
                         statsOverlay:current.statsOverlay];
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPGameParksWroteOscV25"];
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPMigratedOscAutoV21"];
 }
 
 #pragma mark - App lifecycle (upstream: beginForegroundRefresh / handleEnterBackground)
@@ -251,12 +375,15 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     [self scanLocalNetworkForce:NO];
     if (_selectedHost != nil && _selectedHost.pairState == PairStatePaired) {
         [self activateHost:_selectedHost userInitiated:NO skipFastPath:NO];
+        // GP v2.5 (A-63): foregrounding also recovers any box art a
+        // cancelled/failed earlier cycle left missing.
+        [self retrieveMissingAssetsForHost:_selectedHost];
     }
 }
 
 - (void)appWillResignActive {
     [_discMan stopDiscovery];
-    [_scanner cancel];
+    [self cancelScanSynchronously];
     [_assetManager stopRetrieving];
 }
 
@@ -315,12 +442,14 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     }
     _scanInProgress = YES;
     _lastScanStart = [NSDate date];
+    _scanGeneration += 1;
+    NSUInteger scanGeneration = _scanGeneration;
     __weak typeof(self) weakSelf = self;
     [_scanner scanWithDiscoveryManager:_discMan onHost:^(TemporaryHost *host) {
         [weakSelf adoptScannedHost:host];
     } completion:^(BOOL completed) {
         GPSessionController *strongSelf = weakSelf;
-        if (strongSelf == nil) {
+        if (strongSelf == nil || strongSelf->_scanGeneration != scanGeneration) {
             return;
         }
         strongSelf->_scanInProgress = NO;
@@ -351,14 +480,35 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         return;
     }
 
+    // GP v2.5 (A-11): coalesce concurrent activations per host.
+    NSString *hostKey = [self hostKeyForHost:host];
+    @synchronized (_activationInFlight) {
+        if ([_activationInFlight containsObject:hostKey]) {
+            return;
+        }
+        [_activationInFlight addObject:hostKey];
+    }
+    NSUInteger generation = [self generationForHostKey:hostKey];
+
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // Wait for the PC's status to be known (upstream does this).
-        while (host.state == StateUnknown) {
+        // GP v2.5 (A-10): bounded (max 15 iterations) and abandoned if
+        // the host was removed (generation bump) or a stream started.
+        int unknownWaits = 0;
+        while (host.state == StateUnknown && unknownWaits++ < 15) {
+            if ([self generationForHostKey:hostKey] != generation || self->_streamActive) {
+                break;
+            }
             sleep(1);
+        }
+        if (host.state == StateUnknown) {
+            [self endActivationForKey:hostKey];
+            return;
         }
 
         // Don't bother polling if the server is already offline.
         if (host.state == StateOffline) {
+            [self endActivationForKey:hostKey];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self postHostsChanged];
             });
@@ -379,7 +529,12 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 
         if (![serverInfoResp isStatusOk]) {
             Log(LOG_W, @"Failed to get server info: %@", serverInfoResp.statusMessage);
+            [self endActivationForKey:hostKey];
             dispatch_async(dispatch_get_main_queue(), ^{
+                // GP v2.5 (A-55): never apply a stale failure.
+                if (![self failureIsCurrentForHost:host generation:generation key:hostKey]) {
+                    return;
+                }
                 host.state = StateOffline;
                 if (userInitiated) {
                     [self postHostInfoError:host
@@ -418,6 +573,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                 [self postHostsChanged];
             });
         }
+        [self endActivationForKey:hostKey];
     });
 }
 
@@ -433,42 +589,112 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 /// this is the queue discipline whose absence on the main queue
 /// deadlocked v1.1's pairing.
 - (void)startPairingWithHost:(TemporaryHost *)host httpManager:(HttpManager *)hMan {
-    if (_pairingInProgress) {
+    // GP v2.5 (A-54): pairing state is confined to the main queue.
+    // This method runs on a background queue (from activateHost), so
+    // the claim is taken synchronously on main before anything else.
+    __block BOOL claimed = NO;
+    __block NSUInteger generation = 0;
+    void (^claim)(void) = ^{
+        if (self->_pairingInProgress) {
+            return;
+        }
+        self->_pairingInProgress = YES;
+        self->_pairingCancelled = NO;
+        self->_pairingHost = host;
+        self->_pairingGeneration += 1;
+        generation = self->_pairingGeneration;
+        claimed = YES;
+    };
+    if ([NSThread isMainThread]) {
+        claim();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), claim);
+    }
+    if (!claimed) {
         return;
     }
-    _pairingInProgress = YES;
-    _pairingCancelled = NO;
-    _pairingHost = host;
 
     // Polling the server while pairing causes the server to screw
     // up, so discovery stops completely first (upstream's words).
     [_discMan stopDiscoveryBlocking];
 
-    PairManager *pMan = [[PairManager alloc] initWithManager:hMan clientCert:_clientCert callback:self];
-    if (pMan == nil) {
-        _pairingInProgress = NO;
-        _pairingHost = nil;
-        [_discMan startDiscovery];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (self.onPairingResult) {
-                self.onPairingResult(NO, @"Pairing could not start. Try again.");
-            }
-        });
+    // GP v2.5 (A-13): the operation gets a generation-stamped proxy
+    // callback and is retained, so cancelPairing can cancel it and
+    // its late callbacks are ignored once superseded. (A-115: the old
+    // nil-PairManager branch was dead code and is gone.)
+    GPGenerationPairCallback *callback = [[GPGenerationPairCallback alloc] init];
+    callback.session = self;
+    callback.generation = generation;
+    PairManager *pMan = [[PairManager alloc] initWithManager:hMan clientCert:_clientCert callback:callback];
+
+    __block BOOL stillCurrent = NO;
+    void (^store)(void) = ^{
+        if (self->_pairingGeneration == generation && self->_pairingInProgress) {
+            self->_currentPairManager = pMan;
+            stillCurrent = YES;
+        }
+    };
+    if ([NSThread isMainThread]) {
+        store();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), store);
+    }
+    if (!stillCurrent) {
+        [pMan cancel];
         return;
     }
     [_opQueue addOperation:pMan];
+
+    // GP v2.5 (A-54): watchdog — a PairManager that ends without a
+    // callback must not wedge pairing for the life of the process.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!self->_pairingInProgress || self->_pairingGeneration != generation) {
+            return;
+        }
+        self->_pairingGeneration += 1;
+        [self->_currentPairManager cancel];
+        self->_currentPairManager = nil;
+        self->_pairingInProgress = NO;
+        self->_pairingHost = nil;
+        [self->_discMan startDiscovery];
+        if (self.onPairingResult) {
+            self.onPairingResult(NO, @"Pairing timed out. Try again.");
+        }
+        [self postHostsChanged];
+    });
 }
 
 - (void)cancelPairing {
+    // GP v2.5 (A-13/A-54): main-queue confined; bump the generation,
+    // cancel the actual PairManager operation, and clear state so a
+    // late callback from it is dropped as stale.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self cancelPairing];
+        });
+        return;
+    }
+    _pairingGeneration += 1;
+    [_currentPairManager cancel];
+    _currentPairManager = nil;
     _pairingCancelled = YES;
     _pairingInProgress = NO;
+    _pairingHost = nil;
     [_discMan startDiscovery];
 }
 
 - (void)startPairing:(NSString *)PIN {
+    [self startPairing:PIN generation:_pairingGeneration];
+}
+
+- (void)startPairing:(NSString *)PIN generation:(NSUInteger)generation {
     // Needs to be synchronous to ensure the PIN UI is shown before
     // any potential failure callback could be invoked (upstream).
     dispatch_sync(dispatch_get_main_queue(), ^{
+        if (generation != self->_pairingGeneration) {
+            return; // GP v2.5 (A-13): stale attempt's PIN.
+        }
         if (self.onPairingPIN) {
             self.onPairingPIN(PIN);
         }
@@ -476,7 +702,15 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 }
 
 - (void)pairSuccessful:(NSData *)serverCert {
+    [self pairSuccessful:serverCert generation:_pairingGeneration];
+}
+
+- (void)pairSuccessful:(NSData *)serverCert generation:(NSUInteger)generation {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != self->_pairingGeneration) {
+            return; // GP v2.5 (A-13): stale attempt — ignore.
+        }
+        self->_currentPairManager = nil;
         // GP: apply the result to the host that was actually paired
         // (upstream applies it to its selected host; v1.2 shipped a
         // bug doing exactly that when the two differed).
@@ -503,7 +737,15 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 }
 
 - (void)pairFailed:(NSString *)message {
+    [self pairFailed:message generation:_pairingGeneration];
+}
+
+- (void)pairFailed:(NSString *)message generation:(NSUInteger)generation {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != self->_pairingGeneration) {
+            return; // GP v2.5 (A-13): stale attempt — ignore.
+        }
+        self->_currentPairManager = nil;
         BOOL cancelled = self->_pairingCancelled;
         self->_pairingInProgress = NO;
         self->_pairingHost = nil;
@@ -519,7 +761,15 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 }
 
 - (void)alreadyPaired {
+    [self alreadyPairedWithGeneration:_pairingGeneration];
+}
+
+- (void)alreadyPairedWithGeneration:(NSUInteger)generation {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != self->_pairingGeneration) {
+            return; // GP v2.5 (A-13): stale attempt — ignore.
+        }
+        self->_currentPairManager = nil;
         TemporaryHost *host = self->_pairingHost ?: self->_selectedHost;
         self->_pairingInProgress = NO;
         self->_pairingHost = nil;
@@ -541,8 +791,22 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     if (host.appList.count > 0) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self postAppListChanged:host];
+            // GP v2.5 (A-63/A-56): serving the cached list also
+            // recovers missing box art; stop queued retrievers first.
+            [self->_assetManager stopRetrieving];
+            [self->_assetManager retrieveAssetsFromHost:host];
         });
     }
+
+    // GP v2.5 (A-11): coalesce concurrent app-list fetches per host.
+    NSString *fetchKey = [self hostKeyForHost:host];
+    @synchronized (_fetchInFlight) {
+        if ([_fetchInFlight containsObject:fetchKey]) {
+            return;
+        }
+        [_fetchInFlight addObject:fetchKey];
+    }
+    NSUInteger generation = [self generationForHostKey:fetchKey];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // Exempt this host from discovery while handling the query.
@@ -553,6 +817,13 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         if (![appListResp isStatusOk] || [appListResp getAppList] == nil) {
             Log(LOG_W, @"Failed to get applist: %@", appListResp.statusMessage);
             dispatch_async(dispatch_get_main_queue(), ^{
+                @synchronized (self->_fetchInFlight) {
+                    [self->_fetchInFlight removeObject:fetchKey];
+                }
+                // GP v2.5 (A-55): never apply a stale failure.
+                if (![self failureIsCurrentForHost:host generation:generation key:fetchKey]) {
+                    return;
+                }
                 // GP: the failure is recorded and posted so the
                 // screens show an honest state with Retry, where
                 // upstream shows an alert and drops to host selection.
@@ -566,6 +837,9 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            @synchronized (self->_fetchInFlight) {
+                [self->_fetchInFlight removeObject:fetchKey];
+            }
             [self updateAppList:[appListResp getAppList] forHost:host];
             [self->_appListErrors removeObjectForKey:host.uuid];
             [self postAppListChanged:host];
@@ -574,6 +848,9 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             // the host serves that isn't already cached on disk
             // (upstream calls retrieveAssetsFromHost the same way;
             // the retrievers run in the background, max 4 at once).
+            // GP v2.5 (A-56): stop any previous retrieval first, as
+            // upstream does in alreadyPaired.
+            [self->_assetManager stopRetrieving];
             [self->_assetManager retrieveAssetsFromHost:host];
         });
     });
@@ -586,14 +863,28 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 /// rebuild, not one per image (and the screens' own scroll-aware
 /// deferral holds it until scrolling ends regardless).
 - (void)receivedAssetForApp:(TemporaryApp *)app {
+    [self receivedAssetForApp:app success:YES];
+}
+
+- (void)receivedAssetForApp:(TemporaryApp *)app success:(BOOL)success {
+    // GP v2.5 (A-65): failures write nothing, so they must not
+    // trigger a rebuild; and the coalesced post re-captures a
+    // non-nil host from any arrival during the window.
+    if (!success) {
+        return;
+    }
+    if (app.host != nil) {
+        _assetRefreshHost = app.host;
+    }
     if (_assetRefreshScheduled) {
         return;
     }
     _assetRefreshScheduled = YES;
-    TemporaryHost *host = app.host;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         self->_assetRefreshScheduled = NO;
+        TemporaryHost *host = self->_assetRefreshHost;
+        self->_assetRefreshHost = nil;
         if (host != nil) {
             [self postAppListChanged:host];
         }
@@ -672,6 +963,14 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 }
 
 - (void)removeHost:(TemporaryHost *)host {
+    // GP v2.5 (A-62): all state mutated here is main-queue state —
+    // dispatch to main at entry when called from anywhere else.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self removeHost:host];
+        });
+        return;
+    }
     [_discMan removeHostFromDiscovery:host];
     DataManager *dataMan = [[DataManager alloc] init];
     [dataMan removeHost:host];
@@ -682,6 +981,16 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         _selectedHost = nil;
     }
     [_appListErrors removeObjectForKey:host.uuid];
+    [_pingSamplesMs removeObjectForKey:host.uuid];
+    if (_pairingHost != nil && [_pairingHost.uuid isEqualToString:host.uuid]) {
+        _pairingHost = nil;
+        _pairingGeneration += 1;
+        [_currentPairManager cancel];
+        _currentPairManager = nil;
+        _pairingInProgress = NO;
+    }
+    // Invalidate any in-flight activation/fetch for this host (A-55).
+    [self bumpGenerationForHostKey:[self hostKeyForHost:host]];
     [self postHostsChanged];
 }
 
@@ -904,7 +1213,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     // Upstream's front-end disappears when the stream is pushed,
     // which stops its discovery. Mirror that here.
     [_discMan stopDiscovery];
-    [_scanner cancel];
+    [self cancelScanSynchronously];
 }
 
 - (void)noteStreamEnded {
@@ -967,10 +1276,31 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 - (NSString *)hostsSignature:(NSArray<TemporaryHost *> *)hosts {
     NSMutableString *signature = [NSMutableString string];
     for (TemporaryHost *host in hosts) {
-        [signature appendFormat:@"%@|%@|%d|%d|%@|%lu|%@;",
+        // GP v2.5 (A-09): every rendered/launch-relevant field —
+        // codec support, HTTPS port, MAC, addresses, a hash of the
+        // server cert, and the app list's CONTENTS (id+name+HDR per
+        // app, sorted), not just its count.
+        NSUInteger certHash = 2166136261u;
+        const unsigned char *certBytes = [host.serverCert bytes];
+        for (NSUInteger i = 0; i < [host.serverCert length]; i++) {
+            certHash ^= certBytes[i];
+            certHash *= 16777619u;
+        }
+        NSMutableString *appsSignature = [NSMutableString string];
+        NSArray<TemporaryApp *> *apps = [host.appList sortedArrayUsingComparator:
+            ^NSComparisonResult(TemporaryApp *a, TemporaryApp *b) {
+                NSComparisonResult byId = [(a.id ?: @"") compare:(b.id ?: @"")];
+                return byId != NSOrderedSame ? byId : [(a.name ?: @"") compare:(b.name ?: @"")];
+            }];
+        for (TemporaryApp *app in apps) {
+            [appsSignature appendFormat:@"%@=%@/%d,", app.id ?: @"", app.name ?: @"", app.hdrSupported ? 1 : 0];
+        }
+        [signature appendFormat:@"%@|%@|%d|%d|%@|%d|%hu|%@|%@|%@|%@|%@|%lu|%@;",
          host.uuid ?: @"", host.name ?: @"", (int)host.state, (int)host.pairState,
-         host.currentGame ?: @"", (unsigned long)host.appList.count,
-         host.activeAddress ?: @""];
+         host.currentGame ?: @"", host.serverCodecModeSupport, host.httpsPort,
+         host.mac ?: @"", host.localAddress ?: @"", host.externalAddress ?: @"",
+         host.ipv6Address ?: @"", host.activeAddress ?: @"",
+         (unsigned long)certHash, appsSignature];
     }
     if (_selectedHost != nil) {
         [signature appendFormat:@"sel:%@", _selectedHost.uuid ?: @""];

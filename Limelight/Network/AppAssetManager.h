@@ -1,5 +1,5 @@
 //
-//  AppManager.h
+//  AppAssetManager.h
 //  Moonlight
 //
 //  Created by Diego Waxemberg on 10/25/14.
@@ -14,6 +14,11 @@
 
 - (void) receivedAssetForApp:(TemporaryApp*)app;
 
+@optional
+// GP v2.5 (A-65): success-aware variant. When the callback implements
+// this, the retriever reports whether a file was actually written.
+- (void) receivedAssetForApp:(TemporaryApp*)app success:(BOOL)success;
+
 @end
 
 @interface AppAssetManager : NSObject
@@ -22,5 +27,8 @@
 - (void) retrieveAssetsFromHost:(TemporaryHost*)host;
 - (void) stopRetrieving;
 + (NSString*) boxArtPathForApp:(TemporaryApp*)app;
+// GP v2.5 (A-67): path derived from an explicit host (the one the
+// retriever was given), not from app.host.
++ (NSString*) boxArtPathForApp:(TemporaryApp*)app host:(TemporaryHost*)host;
 
 @end

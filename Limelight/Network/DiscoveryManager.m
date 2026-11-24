@@ -127,6 +127,10 @@
 }
 
 - (void) discoverHost:(NSString *)hostAddress withCallback:(void (^)(TemporaryHost *, NSString*))callback {
+    [self discoverHost:hostAddress withCallback:callback shouldAddToDiscovery:nil];
+}
+
+- (void) discoverHost:(NSString *)hostAddress withCallback:(void (^)(TemporaryHost *, NSString*))callback shouldAddToDiscovery:(BOOL (^)(void))shouldAddToDiscovery {
     BOOL prohibitedAddress = [DiscoveryManager isProhibitedAddress:hostAddress];
     NSString* prohibitedAddressMessage = [NSString stringWithFormat: @"GameParks only supports adding PCs on your local network on %s.",
     #if TARGET_OS_TV
@@ -196,6 +200,13 @@
             }
         }
         
+        // GP v2.5 (A-57): re-check the caller's token as late as
+        // possible — immediately before the add side effect.
+        if (shouldAddToDiscovery != nil && !shouldAddToDiscovery()) {
+            callback(nil, @"Discovery superseded");
+            return;
+        }
+
         if (![self addHostToDiscovery:host]) {
             callback(nil, @"Host information updated");
         } else {

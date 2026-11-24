@@ -7,15 +7,21 @@
 //  own settings store (DataManager), because that is what the
 //  stream configuration is built from — GPSettingsStore writes
 //  through it, preserving the fields GameParks doesn't manage.
-//  The three design toggles that have no engine setting behind
-//  them (Video filters, Microphone, Anti-deadzone) persist as
-//  GameParks preferences, as they did in earlier versions.
+//  Every control on these screens writes a real engine setting:
+//  the old Video filters / Microphone / Anti-deadzone rows were
+//  removed in v2.5 (A-01) because nothing in the engine ever read
+//  their GameParks preference keys. Their stored values are left
+//  untouched in UserDefaults, just no longer shown.
 //
 
 import UIKit
 import GameController
 
 enum GPSettingsStore {
+    /// Posted when a save finds no settings record (A-18), so the
+    /// failure is never silent.
+    static let saveFailedNotification = Notification.Name("GPSettingsSaveFailed")
+
     static func current() -> TemporarySettings? {
         return DataManager().getSettings()
     }
@@ -37,7 +43,12 @@ enum GPSettingsStore {
                      bitrateKbps: Int? = nil, codec: UInt32? = nil,
                      audioChannels: Int? = nil, onscreenControls: Int? = nil,
                      statsOverlay: Bool? = nil) {
-        guard let cur = current() else { return }
+        guard let cur = current() else {
+            // A-18: never no-op silently — log and notify.
+            NSLog("GPSettingsStore.save: no settings record; save dropped")
+            NotificationCenter.default.post(name: saveFailedNotification, object: nil)
+            return
+        }
         DataManager().saveSettings(
             withBitrate: bitrateKbps ?? cur.bitrate?.intValue ?? 20000,
             framerate: fps ?? cur.framerate?.intValue ?? 60,
@@ -64,22 +75,24 @@ enum GPSettingsStore {
         let height: Int
         let fps: Int
         let bitrateKbps: Int
+        let codec: UInt32
     }
 
     static let presets: [Preset] = [
         Preset(title: "Home Wi-Fi", detail: "1080p · 60 fps · 20 Mb/s · Auto codec",
-               width: 1920, height: 1080, fps: 60, bitrateKbps: 20000),
+               width: 1920, height: 1080, fps: 60, bitrateKbps: 20000, codec: 0),
         Preset(title: "Mobile data saver", detail: "720p · 30 fps · 8 Mb/s",
-               width: 1280, height: 720, fps: 30, bitrateKbps: 8000),
+               width: 1280, height: 720, fps: 30, bitrateKbps: 8000, codec: 0),
         Preset(title: "Cloud — best quality", detail: "1080p HQ · 60 fps · 25 Mb/s",
-               width: 1920, height: 1080, fps: 60, bitrateKbps: 25000),
+               width: 1920, height: 1080, fps: 60, bitrateKbps: 25000, codec: 0),
     ]
 
     static func activePresetIndex() -> Int? {
         guard let cur = current() else { return nil }
         for (index, preset) in presets.enumerated() {
             if cur.width?.intValue == preset.width && cur.height?.intValue == preset.height
-                && cur.framerate?.intValue == preset.fps && cur.bitrate?.intValue == preset.bitrateKbps {
+                && cur.framerate?.intValue == preset.fps && cur.bitrate?.intValue == preset.bitrateKbps
+                && codecPref(of: cur) == preset.codec {
                 return index
             }
         }
@@ -88,7 +101,17 @@ enum GPSettingsStore {
 
     static func applyPreset(_ index: Int) {
         let preset = presets[index]
-        save(width: preset.width, height: preset.height, fps: preset.fps, bitrateKbps: preset.bitrateKbps)
+        save(width: preset.width, height: preset.height, fps: preset.fps,
+             bitrateKbps: preset.bitrateKbps, codec: preset.codec)
+    }
+
+    /// A-18: the explicit row shown when there is no settings record.
+    static func settingsUnavailableView() -> UIView {
+        let view = GPMessageView()
+        view.configure(title: "Settings unavailable — restart the app",
+                       message: "Your stream settings couldn't be loaded, so changes can't be saved right now. Restarting the app should bring them back.",
+                       actionTitle: nil)
+        return view
     }
 }
 
@@ -96,6 +119,12 @@ final class GPSettingsViewController: GPBaseViewController {
     private var session: GPSessionController { GPSessionController.shared() }
 
     private let dynamicStack = UIStackView()
+    // A-53: the header is tracked by reference, not by position.
+    private var headerView: UIView?
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -117,11 +146,8 @@ final class GPSettingsViewController: GPBaseViewController {
     }
 
     override func rebuildContent() {
-        // The header carries the pairing state, so rebuild it too:
-        // it is the scaffold's first arranged view.
-        if let first = contentStack.arrangedSubviews.first, first !== dynamicStack {
-            first.removeFromSuperview()
-        }
+        // The header carries the pairing state, so rebuild it too.
+        headerView?.removeFromSuperview()
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let session = GPSessionController.shared()
@@ -129,7 +155,14 @@ final class GPSettingsViewController: GPBaseViewController {
         let subtitle = host != nil && host!.pairState == .paired
             ? "GameParks · paired to \(host!.name ?? "your PC")"
             : "GameParks"
-        contentStack.insertArrangedSubview(makeHeader(title: "Settings", subtitle: subtitle), at: 0)
+        let header = makeHeader(title: "Settings", subtitle: subtitle)
+        headerView = header
+        contentStack.insertArrangedSubview(header, at: 0)
+
+        // A-18: say so plainly when saves cannot land.
+        if GPSettingsStore.current() == nil {
+            dynamicStack.addArrangedSubview(GPSettingsStore.settingsUnavailableView())
+        }
 
         // Stream presets
         dynamicStack.addArrangedSubview(gpSectionHeader("Stream presets"))
@@ -152,8 +185,8 @@ final class GPSettingsViewController: GPBaseViewController {
         let cur = GPSettingsStore.current()
         let resolutionText = "\(cur?.width?.intValue ?? 1920)×\(cur?.height?.intValue ?? 1080)"
         let rows: [(String, String?, String)] = [
-            ("Resolution", cur?.height?.intValue == 1080 ? "1080p HQ — your settled pick" : nil,
-             resolutionText.replacingOccurrences(of: "×", with: "×")),
+            ("Resolution", (cur?.width?.intValue == 1920 && cur?.height?.intValue == 1080) ? "1080p HQ — your settled pick" : nil,
+             resolutionText),
             ("Bitrate", "Higher = sharper picture", gpFormatBitrate(cur?.bitrate?.intValue ?? 20000)),
             ("Codec", "Auto recommended", GPSettingsStore.codecName(cur != nil ? GPSettingsStore.codecPref(of: cur!) : 0)),
             ("Frame rate", nil, "\(cur?.framerate?.intValue ?? 60) fps"),
@@ -176,19 +209,26 @@ final class GPSettingsViewController: GPBaseViewController {
         controllerRow.valueLabel.text = controllerConnected ? "Paired" : "Not connected"
         dynamicStack.addArrangedSubview(controllerRow)
 
+        // A-37: the toggle reflects the actual engine level and
+        // turning it back on restores the level it had before.
+        let oscLevel = cur?.onscreenControls?.intValue ?? 0
         let oscRow = GPSwitchRow()
         oscRow.titleLabel.text = "On-screen controls"
-        oscRow.subtitle = "Auto — hides when a controller is connected"
-        oscRow.isOn = (cur?.onscreenControls?.intValue ?? 0) != 0
-        oscRow.onToggle = { isOn in GPSettingsStore.save(onscreenControls: isOn ? 1 : 0) }
+        oscRow.subtitle = Self.oscSubtitle(level: oscLevel)
+        oscRow.isOn = oscLevel != 0
+        oscRow.onToggle = { isOn in
+            if isOn {
+                let stored = UserDefaults.standard.integer(forKey: "GPOscPreviousLevel")
+                GPSettingsStore.save(onscreenControls: stored != 0 ? stored : 1)
+            } else {
+                let current = GPSettingsStore.current()?.onscreenControls?.intValue ?? 0
+                if current != 0 {
+                    UserDefaults.standard.set(current, forKey: "GPOscPreviousLevel")
+                }
+                GPSettingsStore.save(onscreenControls: 0)
+            }
+        }
         dynamicStack.addArrangedSubview(oscRow)
-
-        let deadzoneRow = GPSwitchRow()
-        deadzoneRow.titleLabel.text = "Anti-deadzone"
-        deadzoneRow.subtitle = "Fixes loose-stick drift"
-        deadzoneRow.isOn = UserDefaults.standard.bool(forKey: "GPAntiDeadzone")
-        deadzoneRow.onToggle = { isOn in UserDefaults.standard.set(isOn, forKey: "GPAntiDeadzone") }
-        dynamicStack.addArrangedSubview(deadzoneRow)
 
         let statsRow = GPSwitchRow()
         statsRow.titleLabel.text = "Stats overlay"
@@ -227,10 +267,19 @@ final class GPSettingsViewController: GPBaseViewController {
 
         let cloudRow = GPRow(showsChevron: false)
         cloudRow.titleLabel.text = "Cloud PC"
-        cloudRow.subtitle = "Add later — same app, same library"
-        cloudRow.valueLabel.text = "Add"
+        cloudRow.subtitle = "Not set up yet — joins as a second host when one is ready"
         cloudRow.addTarget(self, action: #selector(cloudTapped), for: .touchUpInside)
         dynamicStack.addArrangedSubview(cloudRow)
+    }
+
+    /// Engine level names (OnScreenControlsLevel): Off 0, Auto 1,
+    /// Simple 2, Full 3, plus Auto-with-gamepad variants.
+    static func oscSubtitle(level: Int) -> String {
+        switch level {
+        case 2: return "Simple — basic buttons, always shown"
+        case 3: return "Full — full controls, always shown"
+        default: return "Auto — hides when a controller is connected"
+        }
     }
 
     // MARK: - Actions
@@ -265,6 +314,11 @@ final class GPSettingsViewController: GPBaseViewController {
 
 final class GPStreamSettingsViewController: GPBaseViewController {
     private let dynamicStack = UIStackView()
+    // Segment tables built in rebuildContent (A-40): they include
+    // an exotic stored value as its own segment when one exists.
+    private var resolutionSizes: [(width: Int, height: Int)] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
+    private var frameRates: [Int] = [30, 60, 90, 120]
+    private let codecPrefs: [UInt32] = [0, 2, 1, 3] // Auto, H.265 (HEVC), H.264, AV1
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -279,6 +333,11 @@ final class GPStreamSettingsViewController: GPBaseViewController {
     override func rebuildContent() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let cur = GPSettingsStore.current()
+
+        // A-18: say so plainly when saves cannot land.
+        if cur == nil {
+            dynamicStack.addArrangedSubview(GPSettingsStore.settingsUnavailableView())
+        }
 
         dynamicStack.addArrangedSubview(gpSectionHeader("Presets"))
         let activePreset = GPSettingsStore.activePresetIndex()
@@ -297,20 +356,40 @@ final class GPStreamSettingsViewController: GPBaseViewController {
 
         dynamicStack.addArrangedSubview(gpSectionHeader("Fine tuning"))
 
-        let resolution = gpSegmented(items: ["720p", "1080p", "4K"])
-        resolution.selectedSegmentIndex = (cur?.height?.intValue ?? 1080) >= 2160 ? 2
-            : ((cur?.height?.intValue ?? 1080) >= 1080 ? 1 : 0)
+        // A-40: exact-height match first; a stored size outside the
+        // list gets its own segment labelled with its exact height
+        // rather than silently displaying as a listed size.
+        resolutionSizes = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
+        let storedWidth = cur?.width?.intValue ?? 1920
+        let storedHeight = cur?.height?.intValue ?? 1080
+        if !resolutionSizes.contains(where: { $0.height == storedHeight }) {
+            resolutionSizes.append((storedWidth, storedHeight))
+        }
+        let resolutionItems = resolutionSizes.map { size -> String in
+            switch size.height {
+            case 2160: return "4K"
+            default: return "\(size.height)p"
+            }
+        }
+        let resolution = gpSegmented(items: resolutionItems)
+        resolution.selectedSegmentIndex = resolutionSizes.firstIndex(where: { $0.height == storedHeight }) ?? 1
         resolution.addTarget(self, action: #selector(resolutionChanged(_:)), for: .valueChanged)
         dynamicStack.addArrangedSubview(controlCard(title: "Resolution", control: resolution))
 
-        let frameRate = gpSegmented(items: ["30", "60", "120"])
-        frameRate.selectedSegmentIndex = [30, 60, 120].firstIndex(of: cur?.framerate?.intValue ?? 60) ?? 1
+        frameRates = [30, 60, 90, 120]
+        let storedFps = cur?.framerate?.intValue ?? 60
+        if !frameRates.contains(storedFps) {
+            frameRates.append(storedFps)
+        }
+        let frameRate = gpSegmented(items: frameRates.map { "\($0)" })
+        frameRate.selectedSegmentIndex = frameRates.firstIndex(of: storedFps) ?? 1
         frameRate.addTarget(self, action: #selector(frameRateChanged(_:)), for: .valueChanged)
         dynamicStack.addArrangedSubview(controlCard(title: "Frame rate", control: frameRate))
 
-        let codec = gpSegmented(items: ["Auto", "H.265", "H.264"])
+        // A-36: AV1 is a real segment, mapped to pref 3 both ways.
+        let codec = gpSegmented(items: ["Auto", "H.265", "H.264", "AV1"])
         let codecPref = cur != nil ? GPSettingsStore.codecPref(of: cur!) : 0
-        codec.selectedSegmentIndex = codecPref == 2 ? 1 : (codecPref == 1 ? 2 : 0)
+        codec.selectedSegmentIndex = codecPrefs.firstIndex(of: codecPref) ?? 0
         codec.addTarget(self, action: #selector(codecChanged(_:)), for: .valueChanged)
         dynamicStack.addArrangedSubview(controlCard(title: "Codec", control: codec))
 
@@ -318,14 +397,17 @@ final class GPStreamSettingsViewController: GPBaseViewController {
         let bitrateCard = UIView()
         bitrateCard.backgroundColor = GPColor.panel
         bitrateCard.layer.cornerRadius = 16
-        let bitrateValue = gpLabel("\(Int((Double(cur?.bitrate?.intValue ?? 20000) / 1000.0).rounded())) Mb/s",
-                                   font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 1)
-        bitrateValue.tag = 77
         let stepper = GPGuardedStepper()
-        stepper.minimumValue = 5
-        stepper.maximumValue = 40
+        stepper.minimumValue = 1
+        stepper.maximumValue = 200
         stepper.stepValue = 1
         stepper.value = Double(cur?.bitrate?.intValue ?? 20000) / 1000.0
+        // A-39: the label is built from the stepper's (clamped)
+        // value, so the two can never disagree; an out-of-range
+        // stored value is only written back clamped on first save.
+        let bitrateValue = gpLabel("\(Int(stepper.value)) Mb/s",
+                                   font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+        bitrateValue.tag = 77
         stepper.tintColor = GPColor.accent
         stepper.addTarget(self, action: #selector(bitrateChanged(_:)), for: .valueChanged)
         let bitrateText = UIStackView(arrangedSubviews: [
@@ -348,33 +430,22 @@ final class GPStreamSettingsViewController: GPBaseViewController {
         ])
         dynamicStack.addArrangedSubview(bitrateCard)
 
-        let filtersRow = GPSwitchRow()
-        filtersRow.titleLabel.text = "Video filters"
-        filtersRow.subtitle = "Sharpen · colour boost"
-        filtersRow.isOn = UserDefaults.standard.bool(forKey: "GPVideoFilters")
-        filtersRow.onToggle = { isOn in UserDefaults.standard.set(isOn, forKey: "GPVideoFilters") }
-        dynamicStack.addArrangedSubview(filtersRow)
-
-        let micRow = GPSwitchRow()
-        micRow.titleLabel.text = "Microphone"
-        micRow.subtitle = "Voice chat passthrough"
-        micRow.isOn = UserDefaults.standard.bool(forKey: "GPMicrophone")
-        micRow.onToggle = { isOn in UserDefaults.standard.set(isOn, forKey: "GPMicrophone") }
-        dynamicStack.addArrangedSubview(micRow)
-
         let surround = gpSegmented(items: ["Stereo", "5.1", "7.1"])
         surround.selectedSegmentIndex = (cur?.audioConfig?.intValue ?? 2) >= 8 ? 2
             : ((cur?.audioConfig?.intValue ?? 2) >= 6 ? 1 : 0)
         surround.addTarget(self, action: #selector(surroundChanged(_:)), for: .valueChanged)
         dynamicStack.addArrangedSubview(controlCard(title: "Surround audio", control: surround))
+        // A-41: the engine clamps to the phone's physical output.
+        dynamicStack.addArrangedSubview(gpLabel("Limited by your phone's audio output.",
+                                                font: GPFont.body(13), color: GPColor.textSecondary, lines: 0))
 
-        // Why Auto — the design's own explanation, verbatim.
+        // Why Auto — why forcing a codec is a bad idea (A-92).
         let whyCard = UIView()
         whyCard.backgroundColor = GPColor.panel
         whyCard.layer.cornerRadius = 16
         let whyStack = UIStackView(arrangedSubviews: [
             gpLabel("Why Auto?", font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1),
-            gpLabel("Forcing H.265 made streams hang on XStreaming. Auto picks the best codec your phone and PC agree on — every time.",
+            gpLabel("Forcing H.265 made streams hang. Auto picks the best codec your phone and PC agree on — every time.",
                     font: GPFont.body(13), color: GPColor.textSecondary, lines: 0),
         ])
         whyStack.axis = .vertical
@@ -419,20 +490,19 @@ final class GPStreamSettingsViewController: GPBaseViewController {
     }
 
     @objc private func resolutionChanged(_ sender: UISegmentedControl) {
-        switch sender.selectedSegmentIndex {
-        case 0: GPSettingsStore.save(width: 1280, height: 720)
-        case 2: GPSettingsStore.save(width: 3840, height: 2160)
-        default: GPSettingsStore.save(width: 1920, height: 1080)
-        }
+        guard resolutionSizes.indices.contains(sender.selectedSegmentIndex) else { return }
+        let size = resolutionSizes[sender.selectedSegmentIndex]
+        GPSettingsStore.save(width: size.width, height: size.height)
     }
 
     @objc private func frameRateChanged(_ sender: UISegmentedControl) {
-        GPSettingsStore.save(fps: [30, 60, 120][sender.selectedSegmentIndex])
+        guard frameRates.indices.contains(sender.selectedSegmentIndex) else { return }
+        GPSettingsStore.save(fps: frameRates[sender.selectedSegmentIndex])
     }
 
     @objc private func codecChanged(_ sender: UISegmentedControl) {
-        let prefs: [UInt32] = [0, 2, 1] // Auto, H.265 (HEVC), H.264
-        GPSettingsStore.save(codec: prefs[sender.selectedSegmentIndex])
+        guard codecPrefs.indices.contains(sender.selectedSegmentIndex) else { return }
+        GPSettingsStore.save(codec: codecPrefs[sender.selectedSegmentIndex])
     }
 
     @objc private func bitrateChanged(_ sender: UIStepper) {

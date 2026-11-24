@@ -18,11 +18,15 @@ final class GPLibraryViewController: GPBaseViewController {
         case all, big, classics, favourites
     }
 
-    private let subtitleLabel = gpLabel(nil, font: GPFont.body(14), color: GPColor.textSecondary, lines: 1)
+    private let subtitleLabel = gpLabel(nil, font: GPFont.body(14), color: GPColor.textSecondary, lines: 2)
     private let searchField = UITextField()
     private var filter: Filter = .all
     private var chips: [Filter: GPChipButton] = [:]
     private let dynamicStack = UIStackView()
+    /// A-74: the host the visible rows were rendered for.
+    private var renderingHost: TemporaryHost?
+    /// A-73: pending debounced search rebuild.
+    private var searchWorkItem: DispatchWorkItem?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -80,12 +84,14 @@ final class GPLibraryViewController: GPBaseViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
                                                name: .GPAppListChanged, object: nil)
         refreshChips()
-        rebuildContent()
+        // A-73: chips take the scroll-safe path too.
+        requestContentRebuild()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        performContentRebuild()
+        // A-31: appearance goes through the scroll-safe path.
+        requestContentRebuild()
     }
 
     @objc private func stateChanged() {
@@ -93,7 +99,27 @@ final class GPLibraryViewController: GPBaseViewController {
     }
 
     @objc private func searchChanged() {
-        rebuildContent()
+        // A-73: debounce keystrokes, then take the scroll-safe path.
+        searchWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.requestContentRebuild() }
+        searchWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    /// A-23: folded substring match, plus a normalised-token match
+    /// so "pokemon" finds Pokémon, "spiderman" finds Spider-Man and
+    /// "gta" finds Grand Theft Auto titles.
+    private func appMatches(_ app: TemporaryApp, query rawQuery: String) -> Bool {
+        let name = app.name ?? ""
+        let foldedName = name.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+        let foldedQuery = rawQuery.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+        if foldedName.contains(foldedQuery) { return true }
+        let normalizedName = GPCatalog.normalized(name)
+        let normalizedQuery = GPCatalog.normalized(rawQuery)
+        if !normalizedQuery.isEmpty && normalizedName.contains(normalizedQuery) { return true }
+        let nameTokens = normalizedName.split(separator: " ").map(String.init)
+        let queryTokens = normalizedQuery.split(separator: " ").map(String.init)
+        return !queryTokens.isEmpty && queryTokens.allSatisfy { nameTokens.contains($0) }
     }
 
     private func filterTag(_ value: Filter) -> Int {
@@ -113,7 +139,8 @@ final class GPLibraryViewController: GPBaseViewController {
         default: filter = .all
         }
         refreshChips()
-        rebuildContent()
+        // A-73: chips take the scroll-safe path too.
+        requestContentRebuild()
     }
 
     private func refreshChips() {
@@ -129,6 +156,7 @@ final class GPLibraryViewController: GPBaseViewController {
         let session = GPSessionController.shared()
 
         guard let host = session.selectedHost ?? session.hosts.first else {
+            renderingHost = nil
             subtitleLabel.text = "No PC yet"
             let message = GPMessageView()
             message.configure(title: "No PC found yet",
@@ -139,8 +167,8 @@ final class GPLibraryViewController: GPBaseViewController {
             return
         }
 
+        renderingHost = host
         let allApps = GPCatalog.sortedApps(for: host)
-        subtitleLabel.text = "\(allApps.count) games · Steam + your own installs"
 
         if host.pairState != .paired {
             let message = GPMessageView()
@@ -166,24 +194,39 @@ final class GPLibraryViewController: GPBaseViewController {
             return
         }
 
+        // A-72/A-106: subtitle is set only once the list will
+        // actually render, counts games only (not Desktop), drops
+        // the unchecked provenance clause, and pluralises.
+        let gameCount = allApps.filter { !GPCatalog.isDesktop($0) }.count
+        subtitleLabel.text = gameCount == 1 ? "1 game" : "\(gameCount) games"
+
         var apps = allApps
         switch filter {
         case .all:
             break
         case .big:
-            apps = apps.filter { !GPCatalog.info(for: $0).isClassic }
+            apps = apps.filter { !GPCatalog.info(for: $0).isClassic && !GPCatalog.isDesktop($0) }
         case .classics:
             apps = apps.filter { GPCatalog.info(for: $0).isClassic }
         case .favourites:
             apps = apps.filter { GPCatalog.isFavourite(host: host, app: $0) }
         }
-        let query = (searchField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let query = (searchField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !query.isEmpty {
-            apps = apps.filter { ($0.name ?? "").lowercased().contains(query) }
+            apps = apps.filter { appMatches($0, query: query) }
         }
 
         if apps.isEmpty {
-            dynamicStack.addArrangedSubview(gpLabel("No games match — try another search.",
+            // A-103: blame the search only when there is one.
+            let emptyText: String
+            if !query.isEmpty {
+                emptyText = "No games match — try another search."
+            } else if filter == .favourites {
+                emptyText = "No favourites yet — open a game and turn on Favourite."
+            } else {
+                emptyText = "Nothing here yet."
+            }
+            dynamicStack.addArrangedSubview(gpLabel(emptyText,
                                                     font: GPFont.body(14), color: GPColor.textSecondary, lines: 0))
             return
         }
@@ -195,6 +238,7 @@ final class GPLibraryViewController: GPBaseViewController {
                           subtitle: info.sourceTag,
                           cover: GPCatalog.coverImage(for: app))
             row.accessibilityIdentifier = GPCatalog.appKey(host: host, app: app)
+            row.appKey = GPCatalog.appKey(host: host, app: app)
             row.addTarget(self, action: #selector(appRowTapped(_:)), for: .touchUpInside)
             dynamicStack.addArrangedSubview(row)
         }
@@ -203,8 +247,10 @@ final class GPLibraryViewController: GPBaseViewController {
     // MARK: - Actions — navigation first
 
     @objc private func appRowTapped(_ sender: GPAppRow) {
-        guard let host = GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first,
-              let key = sender.accessibilityIdentifier,
+        // A-74: resolve against the rendering host, via the row's
+        // dedicated appKey (A-27).
+        guard let host = renderingHost ?? GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first,
+              let key = sender.appKey,
               let app = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.appKey(host: host, app: $0) == key })
         else { return }
         navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)

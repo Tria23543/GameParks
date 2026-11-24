@@ -101,7 +101,8 @@ import Foundation
                       self.currentGeneration() == gen else {
                     return
                 }
-                if let host = Self.validate(address: address, discoveryManager: discoveryManager),
+                if let host = self.validate(address: address, discoveryManager: discoveryManager,
+                                            isCurrent: { self.currentGeneration() == gen }),
                    self.currentGeneration() == gen {
                     onHost(host)
                 }
@@ -116,14 +117,20 @@ import Foundation
     /// with a bound. On timeout the probe is abandoned (nil); the
     /// orphaned request is left to time out on its own queue, so one
     /// silent host can no longer stall the sweep or its completion.
-    private static func validate(address: String, discoveryManager: DiscoveryManager) -> TemporaryHost? {
+    private func validate(address: String, discoveryManager: DiscoveryManager,
+                          isCurrent: @escaping () -> Bool) -> TemporaryHost? {
         let semaphore = DispatchSemaphore(value: 0)
         var result: TemporaryHost?
         DispatchQueue.global(qos: .userInitiated).async {
-            discoveryManager.discoverHost(address) { host, _ in
+            // GP v2.5 (A-57): the token-aware variant re-checks the
+            // sweep generation immediately before discoverHost would
+            // add the host to the discovery queue, so a validation that
+            // finishes after this sweep was cancelled/superseded has
+            // no discovery side effect.
+            discoveryManager.discoverHost(address, withCallback: { host, _ in
                 result = host
                 semaphore.signal()
-            }
+            }, shouldAddToDiscovery: { isCurrent() })
         }
         guard semaphore.wait(timeout: .now() + validationTimeout) == .success else {
             return nil
@@ -164,11 +171,16 @@ import Foundation
                     $0.pointee.sin_addr.s_addr
                 })
             }
-            if best == nil || (isLinkLocal(best!.addr) && !isLinkLocal(addr)) {
+            // GP v2.5 (A-58): rank candidates — RFC1918 beats any
+            // other non-link-local address, which beats link-local —
+            // instead of "first non-link-local wins".
+            if best == nil || addressRank(addr) > addressRank(best!.addr) {
                 best = (addr, mask)
             }
         }
         guard let chosen = best, chosen.addr != 0 else { return nil }
+        NSLog("GPSubnetScanner: sweeping from en0 address %@ mask %@",
+              ipString(chosen.addr), ipString(chosen.mask))
         var mask = chosen.mask
         if mask == 0 {
             mask = 0xFFFFFF00
@@ -194,6 +206,18 @@ import Foundation
 
     private static func isLinkLocal(_ addr: UInt32) -> Bool {
         return (addr & 0xFFFF0000) == 0xA9FE0000 // 169.254.0.0/16
+    }
+
+    private static func isRFC1918(_ addr: UInt32) -> Bool {
+        return (addr & 0xFF000000) == 0x0A000000        // 10.0.0.0/8
+            || (addr & 0xFFF00000) == 0xAC100000        // 172.16.0.0/12
+            || (addr & 0xFFFF0000) == 0xC0A80000        // 192.168.0.0/16
+    }
+
+    private static func addressRank(_ addr: UInt32) -> Int {
+        if isRFC1918(addr) { return 2 }
+        if isLinkLocal(addr) { return 0 }
+        return 1
     }
 
     private static func ipString(_ value: UInt32) -> String {
@@ -235,14 +259,18 @@ import Foundation
         var pfd = pollfd()
         pfd.fd = fd
         pfd.events = Int16(POLLOUT)
+        // GP v2.5 (A-59): absolute deadline — an EINTR retry re-arms
+        // only the time REMAINING to the deadline, so interruptions
+        // can no longer stretch one probe to ~3x the timeout.
+        let deadline = Date().addingTimeInterval(Double(probeTimeoutMs) / 1000.0)
         var ready: Int32 = -1
-        var attempts = 0
-        while ready < 0 && attempts < 3 {
-            ready = poll(&pfd, 1, probeTimeoutMs)
+        while ready < 0 {
+            let remainingMs = Int32(deadline.timeIntervalSinceNow * 1000)
+            if remainingMs <= 0 { break }
+            ready = poll(&pfd, 1, remainingMs)
             if ready < 0 && errno != EINTR {
                 break // A real poll error, not an interruption.
             }
-            attempts += 1
         }
         guard ready > 0, pfd.revents & Int16(POLLOUT) != 0 else { return false }
 

@@ -71,10 +71,16 @@ final class GPTabBarController: UITabBarController, UINavigationControllerDelega
         // The stream screen has popped back to the root: close the
         // session and let the engine refresh, like upstream's
         // return to its main screen.
-        guard viewController === self, GPStats.shared.hasActiveSession else {
+        guard viewController === self else {
             return
         }
-        GPStats.shared.endSession()
+        // A-14: ending the stream at the engine is NOT gated on the
+        // stats session — noteStreamEnded() is idempotent, and if it
+        // is skipped, discovery stays stopped for the life of the
+        // process. End the stats session too, when one is active.
+        if GPStats.shared.hasActiveSession {
+            GPStats.shared.endSession()
+        }
         GPSessionController.shared().noteStreamEnded()
     }
 }

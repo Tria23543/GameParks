@@ -7,8 +7,16 @@
 //  screen and the "Played / Last played" figures on Home and the
 //  game page. Stored in UserDefaults; nothing leaves the device.
 //
+//  The active session is persisted as it runs (A-15): beginSession
+//  writes it to UserDefaults and a heartbeat keeps it fresh, so a
+//  crash, kill or reboot mid-stream is reconciled on next launch
+//  instead of vanishing. Duration is accumulated from the
+//  monotonic system-uptime clock and pauses while the app is
+//  backgrounded (A-44). Lifetime totals live in their own persisted
+//  counters that record pruning never reduces (A-46).
+//
 
-import Foundation
+import UIKit
 
 struct GPSessionRecord {
     let appKey: String
@@ -22,6 +30,8 @@ final class GPStats {
     static let shared = GPStats()
 
     private let storageKey = "GPSessionsV2"
+    private let activeSessionKey = "GPActiveSessionV1"
+    private let aggregatesKey = "GPLifetimeAggregatesV1"
     private var records: [GPSessionRecord] = []
 
     private var activeKey: String?
@@ -29,17 +39,42 @@ final class GPStats {
     private var activeStart: Date?
     private var activeBitrateKbps: Int = 20000
 
+    // Monotonic accumulation (A-44): banked seconds plus the
+    // uptime at which the current un-paused stretch began.
+    private var activeAccumulated: TimeInterval = 0
+    private var activeStretchStartUptime: TimeInterval?
+    private var heartbeatTimer: Timer?
+
+    // Lifetime aggregates (A-46), persisted separately so pruning
+    // the record list can never shrink them.
+    private var lifetimeSeconds: TimeInterval = 0
+    private var lifetimeSessions: Int = 0
+
     private init() {
         records = Self.load()
+        loadAggregates()
+        reconcilePersistedActiveSession()
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
+                                               name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
+                                               name: UIApplication.didBecomeActiveNotification, object: nil)
     }
 
     // MARK: - Recording
 
     func beginSession(appKey: String, appName: String, bitrateKbps: Int) {
+        // A-42: never silently overwrite a session in progress.
+        if hasActiveSession {
+            endSession()
+        }
         activeKey = appKey
         activeName = appName
         activeStart = Date()
         activeBitrateKbps = max(bitrateKbps, 1)
+        activeAccumulated = 0
+        activeStretchStartUptime = ProcessInfo.processInfo.systemUptime
+        persistActiveSession(heartbeat: Date())
+        startHeartbeat()
     }
 
     var hasActiveSession: Bool { activeStart != nil }
@@ -48,14 +83,35 @@ final class GPStats {
         guard let key = activeKey, let name = activeName, let start = activeStart else {
             return
         }
-        let duration = Date().timeIntervalSince(start)
+        let duration = currentAccumulatedDuration()
+        let bitrate = activeBitrateKbps
         activeKey = nil
         activeName = nil
         activeStart = nil
+        activeAccumulated = 0
+        activeStretchStartUptime = nil
+        stopHeartbeat()
+        UserDefaults.standard.removeObject(forKey: activeSessionKey)
         guard duration >= 1 else { return }
-        records.append(GPSessionRecord(appKey: key, appName: name, start: start,
-                                       duration: duration, bitrateKbps: activeBitrateKbps))
-        // Keep the store bounded and reasonably recent.
+        appendRecord(GPSessionRecord(appKey: key, appName: name, start: start,
+                                     duration: duration, bitrateKbps: bitrate))
+    }
+
+    private func currentAccumulatedDuration() -> TimeInterval {
+        var total = activeAccumulated
+        if let stretchStart = activeStretchStartUptime {
+            total += ProcessInfo.processInfo.systemUptime - stretchStart
+        }
+        return total
+    }
+
+    private func appendRecord(_ record: GPSessionRecord) {
+        records.append(record)
+        lifetimeSeconds += record.duration
+        lifetimeSessions += 1
+        saveAggregates()
+        // Keep the store bounded and reasonably recent. Pruning
+        // touches only the record list, never the aggregates above.
         let cutoff = Date().addingTimeInterval(-180 * 24 * 3600)
         records = records.filter { $0.start > cutoff }
         if records.count > 500 {
@@ -64,14 +120,75 @@ final class GPStats {
         save()
     }
 
-    // MARK: - Aggregates
+    // MARK: - Background pausing (A-44)
 
-    var totalSeconds: TimeInterval {
-        records.reduce(0) { $0 + $1.duration }
+    @objc private func appWillResignActive() {
+        guard hasActiveSession, let stretchStart = activeStretchStartUptime else { return }
+        activeAccumulated += ProcessInfo.processInfo.systemUptime - stretchStart
+        activeStretchStartUptime = nil
+        if let start = activeStart {
+            persistActiveSession(heartbeat: start.addingTimeInterval(activeAccumulated))
+        }
     }
 
+    @objc private func appDidBecomeActive() {
+        guard hasActiveSession, activeStretchStartUptime == nil else { return }
+        activeStretchStartUptime = ProcessInfo.processInfo.systemUptime
+    }
+
+    // MARK: - Active-session persistence (A-15)
+
+    private func persistActiveSession(heartbeat: Date) {
+        guard let key = activeKey, let name = activeName, let start = activeStart else { return }
+        let dict: [String: Any] = ["key": key, "name": name,
+                                   "start": start.timeIntervalSince1970,
+                                   "heartbeat": heartbeat.timeIntervalSince1970,
+                                   "bitrate": activeBitrateKbps]
+        UserDefaults.standard.set(dict, forKey: activeSessionKey)
+    }
+
+    private func startHeartbeat() {
+        stopHeartbeat()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            guard let self = self, self.hasActiveSession else { return }
+            self.persistActiveSession(heartbeat: Date())
+        }
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+    }
+
+    /// A persisted active session at launch means the previous
+    /// process died mid-stream: credit it up to its last heartbeat.
+    private func reconcilePersistedActiveSession() {
+        guard let dict = UserDefaults.standard.dictionary(forKey: activeSessionKey) else { return }
+        UserDefaults.standard.removeObject(forKey: activeSessionKey)
+        guard let key = dict["key"] as? String,
+              let name = dict["name"] as? String,
+              let startTs = dict["start"] as? Double,
+              let heartbeatTs = dict["heartbeat"] as? Double,
+              let bitrate = dict["bitrate"] as? Int else {
+            return
+        }
+        let duration = max(heartbeatTs - startTs, 0)
+        guard duration >= 1 else { return }
+        appendRecord(GPSessionRecord(appKey: key, appName: name,
+                                     start: Date(timeIntervalSince1970: startTs),
+                                     duration: duration, bitrateKbps: bitrate))
+    }
+
+    // MARK: - Aggregates
+
+    /// Lifetime playtime (A-46): never reduced by pruning.
+    var totalSeconds: TimeInterval {
+        lifetimeSeconds
+    }
+
+    /// Lifetime session count (A-46): never reduced by pruning.
     var sessionCount: Int {
-        records.count
+        lifetimeSessions
     }
 
     /// Estimated from each session's duration × its bitrate.
@@ -85,7 +202,11 @@ final class GPStats {
     }
 
     func lastPlayed(forAppKey key: String) -> Date? {
-        records.filter { $0.appKey == key }.map { $0.start }.max()
+        // A-45: when the most recent session *ended*, not started.
+        guard let latest = records.filter({ $0.appKey == key }).max(by: { $0.start < $1.start }) else {
+            return nil
+        }
+        return latest.start.addingTimeInterval(latest.duration)
     }
 
     /// (appKey, appName, seconds) sorted by playtime, longest first.
@@ -126,6 +247,26 @@ final class GPStats {
 
     // MARK: - Persistence
 
+    private func loadAggregates() {
+        if let dict = UserDefaults.standard.dictionary(forKey: aggregatesKey),
+           let seconds = dict["totalSeconds"] as? Double,
+           let sessions = dict["totalSessions"] as? Int {
+            lifetimeSeconds = seconds
+            lifetimeSessions = sessions
+        } else {
+            // First run with aggregates: seed them from the records
+            // on disk so existing history keeps its totals.
+            lifetimeSeconds = records.reduce(0) { $0 + $1.duration }
+            lifetimeSessions = records.count
+            saveAggregates()
+        }
+    }
+
+    private func saveAggregates() {
+        UserDefaults.standard.set(["totalSeconds": lifetimeSeconds,
+                                   "totalSessions": lifetimeSessions], forKey: aggregatesKey)
+    }
+
     private static func load() -> [GPSessionRecord] {
         guard let raw = UserDefaults.standard.array(forKey: "GPSessionsV2") as? [[String: Any]] else {
             return []
@@ -156,13 +297,19 @@ final class GPStats {
 
 // MARK: - Formatting
 
-/// "12.4 h" / "45 min" / "—" for zero.
+/// "12.4 h" / "45 min" / "45 s" / "—" only for zero. (A-75: sub-minute
+/// sessions are real playtime and must not render as "no data"; minutes
+/// are rounded, not truncated.)
 func gpFormatPlaytime(_ seconds: TimeInterval) -> String {
-    if seconds < 60 {
+    if seconds <= 0 {
         return "—"
     }
-    if seconds < 3600 {
-        return "\(Int(seconds / 60)) min"
+    if seconds < 60 {
+        return "\(Int(seconds)) s"
+    }
+    let minutes = Int((seconds / 60).rounded())
+    if minutes < 60 {
+        return "\(minutes) min"
     }
     return String(format: "%.1f h", seconds / 3600.0)
 }

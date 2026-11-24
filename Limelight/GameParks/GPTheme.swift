@@ -50,12 +50,18 @@ enum GPFont {
     static func display(_ size: CGFloat, weight: Weight = .bold) -> UIFont {
         let name: String
         switch weight {
-        case .semibold: name = "Sora-SemiBold"
-        case .bold, .regular: name = "Sora-Bold"
+        // A-84: no Sora-Regular is bundled; the lightest Sora that
+        // actually ships is SemiBold, so .regular honestly maps to
+        // it instead of silently returning Bold.
+        case .regular, .semibold: name = "Sora-SemiBold"
+        case .bold: name = "Sora-Bold"
         case .extrabold: name = "Sora-ExtraBold"
         }
-        return UIFont(name: name, size: size)
+        let base = UIFont(name: name, size: size)
             ?? UIFont.systemFont(ofSize: size, weight: weight.systemWeight)
+        // A-94: scale with the user's text-size setting, keeping the
+        // design size as the default-size base.
+        return UIFontMetrics(forTextStyle: .body).scaledFont(for: base)
     }
 
     static func body(_ size: CGFloat, weight: Weight = .regular) -> UIFont {
@@ -66,8 +72,9 @@ enum GPFont {
         case .bold: name = "Manrope-Bold"
         case .extrabold: name = "Manrope-ExtraBold"
         }
-        return UIFont(name: name, size: size)
+        let base = UIFont(name: name, size: size)
             ?? UIFont.systemFont(ofSize: size, weight: weight.systemWeight)
+        return UIFontMetrics(forTextStyle: .body).scaledFont(for: base)
     }
 }
 
@@ -77,5 +84,6 @@ func gpLabel(_ text: String?, font: UIFont, color: UIColor, lines: Int = 0) -> U
     label.font = font
     label.textColor = color
     label.numberOfLines = lines
+    label.adjustsFontForContentSizeCategory = true
     return label
 }

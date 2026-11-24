@@ -178,6 +178,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     // device in v2.1); the video refit lives here too so it shares
     // that fate, rather than relying on KVO of "bounds", which UIKit
     // does not deliver for this view's layer-backed geometry.
+    // A-98: before the on-screen controls and video renderer exist,
+    // there is nothing to refit — and the size must NOT be recorded
+    // as fitted, or the first real layout at the same size would
+    // skip the refit.
+    if (onScreenControls == nil && self.videoRenderer == nil) {
+        return;
+    }
     if (!CGSizeEqualToSize(self.bounds.size, _lastLayoutSize)) {
         _lastLayoutSize = self.bounds.size;
         [onScreenControls refreshLayout];

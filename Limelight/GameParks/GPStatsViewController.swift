@@ -41,9 +41,11 @@ final class GPStatsViewController: GPBaseViewController {
             dynamicStack.addArrangedSubview(message)
         }
 
-        // Tiles
-        let pings = session.hosts.map { session.lastPingMs(for: $0) }.filter { $0 >= 0 }
-        let avgPing = pings.isEmpty ? "—" : "\(pings.reduce(0, +) / pings.count) ms"
+        // Tiles — A-47: the home ping is the selected (or first)
+        // host's own measured ping, not an average across hosts.
+        let homeHost = session.selectedHost ?? session.hosts.first
+        let homePingMs = homeHost != nil ? session.lastPingMs(for: homeHost!) : -1
+        let homePing = homePingMs >= 0 ? "\(homePingMs) ms" : "—"
         let dataText = stats.totalStreamedGB >= 10
             ? String(format: "%.0f GB", stats.totalStreamedGB)
             : String(format: "%.1f GB", stats.totalStreamedGB)
@@ -53,8 +55,8 @@ final class GPStatsViewController: GPBaseViewController {
             tile(value: "\(stats.sessionCount)", title: "Sessions"),
         ])
         let row2 = UIStackView(arrangedSubviews: [
-            tile(value: dataText, title: "Streamed data"),
-            tile(value: avgPing, title: "Avg. home ping"),
+            tile(value: dataText, title: "Est. streamed data"),
+            tile(value: homePing, title: "Home ping"),
         ])
         for row in [row1, row2] {
             row.axis = .horizontal
@@ -77,7 +79,7 @@ final class GPStatsViewController: GPBaseViewController {
 
         // This week
         let week = stats.thisWeek()
-        dynamicStack.addArrangedSubview(gpSectionHeader("This week", subtitle: "\(week.total) sessions"))
+        dynamicStack.addArrangedSubview(gpSectionHeader("This week", subtitle: week.total == 1 ? "1 session" : "\(week.total) sessions"))
         dynamicStack.addArrangedSubview(weekChart(days: week.days))
     }
 

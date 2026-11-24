@@ -53,6 +53,9 @@
     // GameParks: last size seen by viewWillLayoutSubviews, used to
     // refit the absolute-mode scroll view only when the size changes.
     CGSize _gpLastLayoutSize;
+    // A-33: the pop gesture's enabled value before this screen
+    // disabled it, restored verbatim on disappear.
+    BOOL _gpSavedPopGestureEnabled;
     
 #if !TARGET_OS_TV
     UIScreenEdgePanGestureRecognizer *_exitSwipeRecognizer;
@@ -242,8 +245,9 @@
     [_exitButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     _exitButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     _exitButton.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
-    _exitButton.layer.cornerRadius = 15;
-    _exitButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
+    // A-32: pad to at least the 44 pt touch-target height.
+    _exitButton.layer.cornerRadius = 22;
+    _exitButton.contentEdgeInsets = UIEdgeInsetsMake(14, 16, 14, 16);
     [_exitButton addTarget:self action:@selector(exitButtonPressed) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_exitButton];
 #endif
@@ -264,13 +268,17 @@
     // screen instead of ending the stream. Disable it while the
     // stream screen is on top so upstream's left-edge exit swipe is
     // the only edge gesture in play.
+    // A-33: save the prior value; another screen may have disabled
+    // the gesture for its own reasons.
+    _gpSavedPopGestureEnabled = self.navigationController.interactivePopGestureRecognizer.enabled;
     self.navigationController.interactivePopGestureRecognizer.enabled = NO;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
 
-    self.navigationController.interactivePopGestureRecognizer.enabled = YES;
+    // A-33: restore what viewWillAppear saved, not a hard-coded YES.
+    self.navigationController.interactivePopGestureRecognizer.enabled = _gpSavedPopGestureEnabled;
 }
 
 // GameParks: this screen is pushed from a portrait app, so the view
@@ -285,13 +293,21 @@
 
     CGRect bounds = self.view.bounds;
     BOOL sizeChanged = !CGSizeEqualToSize(bounds.size, _gpLastLayoutSize);
+    // A-97: the zoom/contentSize reset below was written for the
+    // portrait->landscape transition; detect that orientation-class
+    // change specifically, not any size change.
+    BOOL orientationClassChanged = sizeChanged && !CGSizeEqualToSize(_gpLastLayoutSize, CGSizeZero)
+        && ((_gpLastLayoutSize.width > _gpLastLayoutSize.height) != (bounds.size.width > bounds.size.height));
     _gpLastLayoutSize = bounds.size;
     if (_streamView != nil) {
-        _streamView.frame = bounds;
+        // A-97: don't fight a user's pinch-zoom with a frame write.
+        if (!(_scrollView != nil && _scrollView.zoomScale != 1.0)) {
+            _streamView.frame = bounds;
+        }
     }
     if (_scrollView != nil) {
         _scrollView.frame = bounds;
-        if (sizeChanged) {
+        if (orientationClassChanged) {
             // GameParks: in absolute-touch mode the stream view lives
             // inside this scroll view, which was also created with the
             // pre-rotation portrait frame. Refit its content to the
@@ -307,7 +323,10 @@
     _spinner.center = CGPointMake(bounds.size.width / 2, bounds.size.height / 2 - _stageLabel.frame.size.height - _spinner.frame.size.height);
     _tipLabel.center = CGPointMake(bounds.size.width / 2, bounds.size.height * 0.9);
     if (_exitButton != nil) {
-        [_exitButton sizeToFit];
+        // A-32: re-size only when the bounds size actually changed.
+        if (sizeChanged) {
+            [_exitButton sizeToFit];
+        }
         CGRect buttonFrame = _exitButton.frame;
         buttonFrame.origin.x = (bounds.size.width - buttonFrame.size.width) / 2;
         buttonFrame.origin.y = self.view.safeAreaInsets.top + 6;
