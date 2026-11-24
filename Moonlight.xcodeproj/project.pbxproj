@@ -23,9 +23,9 @@
 		6A0000000000000000000044 /* GPConnectingViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000012 /* GPConnectingViewController.swift */; };
 		6A0000000000000000000045 /* GPTabBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000013 /* GPTabBarController.swift */; };
 		6A0000000000000000000046 /* GPBootstrap.m in Sources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000014 /* GPBootstrap.m */; };
+		6A0000000000000000000047 /* cover_cricket07.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000035 /* cover_cricket07.jpg */; };
 		6A0000000000000000000048 /* cover_cod.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000018 /* cover_cod.jpg */; };
 		6A0000000000000000000049 /* cover_gta5.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000019 /* cover_gta5.jpg */; };
-		6A0000000000000000000050 /* cover_mafia.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000020 /* cover_mafia.jpg */; };
 		6A0000000000000000000051 /* cover_nfsmw.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000021 /* cover_nfsmw.jpg */; };
 		6A0000000000000000000052 /* cover_rdr2.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000022 /* cover_rdr2.jpg */; };
 		6A0000000000000000000053 /* cover_tlou.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 6A0000000000000000000023 /* cover_tlou.jpg */; };
@@ -219,9 +219,9 @@
 		6A0000000000000000000013 /* GPTabBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPTabBarController.swift; sourceTree = "<group>"; };
 		6A0000000000000000000014 /* GPBootstrap.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GPBootstrap.m; sourceTree = "<group>"; };
 		6A0000000000000000000016 /* GPBootstrap.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GPBootstrap.h; sourceTree = "<group>"; };
+		6A0000000000000000000035 /* cover_cricket07.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_cricket07.jpg; sourceTree = "<group>"; };
 		6A0000000000000000000018 /* cover_cod.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_cod.jpg; sourceTree = "<group>"; };
 		6A0000000000000000000019 /* cover_gta5.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_gta5.jpg; sourceTree = "<group>"; };
-		6A0000000000000000000020 /* cover_mafia.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_mafia.jpg; sourceTree = "<group>"; };
 		6A0000000000000000000021 /* cover_nfsmw.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_nfsmw.jpg; sourceTree = "<group>"; };
 		6A0000000000000000000022 /* cover_rdr2.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_rdr2.jpg; sourceTree = "<group>"; };
 		6A0000000000000000000023 /* cover_tlou.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = cover_tlou.jpg; sourceTree = "<group>"; };
@@ -459,9 +459,9 @@
 		6A0000000000000000000064 /* Covers */ = {
 			isa = PBXGroup;
 			children = (
+				6A0000000000000000000035 /* cover_cricket07.jpg */,
 				6A0000000000000000000018 /* cover_cod.jpg */,
 				6A0000000000000000000019 /* cover_gta5.jpg */,
-				6A0000000000000000000020 /* cover_mafia.jpg */,
 				6A0000000000000000000021 /* cover_nfsmw.jpg */,
 				6A0000000000000000000022 /* cover_rdr2.jpg */,
 				6A0000000000000000000023 /* cover_tlou.jpg */,
@@ -943,9 +943,9 @@
 				FB290E7B19B38036004C83CF /* iPhone.storyboard in Resources */,
 				FB290D0919B2C406004C83CF /* Images.xcassets in Resources */,
 				FB89463819F6473800339C8A /* Launch Screen.xib in Resources */,
+				6A0000000000000000000047 /* cover_cricket07.jpg in Resources */,
 				6A0000000000000000000048 /* cover_cod.jpg in Resources */,
 				6A0000000000000000000049 /* cover_gta5.jpg in Resources */,
-				6A0000000000000000000050 /* cover_mafia.jpg in Resources */,
 				6A0000000000000000000051 /* cover_nfsmw.jpg in Resources */,
 				6A0000000000000000000052 /* cover_rdr2.jpg in Resources */,
 				6A0000000000000000000053 /* cover_tlou.jpg in Resources */,
