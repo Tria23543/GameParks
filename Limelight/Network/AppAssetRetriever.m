@@ -118,6 +118,29 @@ static const int MAX_ATTEMPTS = 5;
                     NSUInteger probeHeight = (NSUInteger)llround(probe.size.height * drawScale);
                     if (probeWidth == 0) { probeWidth = 1; }
                     if (probeHeight == 0) { probeHeight = 1; }
+                    // GP v2.10 (F-02): flooring the short dimension
+                    // at 1 above breaks the cap at extreme aspect
+                    // ratios — the scaled long dimension runs to
+                    // ~sqrt(cap x aspect), so a 100,000,000x1 probe
+                    // would allocate 31,622,777 px (~126 MB), 3.16x
+                    // the cap D-02 exists to enforce. Clamp the
+                    // long dimension so width x height <= cap at
+                    // any aspect ratio; GPCatalog's display side
+                    // applies the same clamp, so both sides share
+                    // one effective bound. (The clamp also absorbs
+                    // the +/-1 px rounding residue at ordinary
+                    // shapes: the product can no longer exceed the
+                    // cap by rounding either.) The short dimension
+                    // here is at most ~3163 (the scaled short side
+                    // of any over-cap image), so the division
+                    // cannot yield 0.
+                    if (probeWidth * probeHeight > 10000000) {
+                        if (probeWidth >= probeHeight) {
+                            probeWidth = 10000000 / probeHeight;
+                        } else {
+                            probeHeight = 10000000 / probeWidth;
+                        }
+                    }
                     CGImageRef cgImage = probe.CGImage;
                     if (cgImage != NULL && probeWidth > 0 && probeHeight > 0) {
                         size_t bytesPerRow = probeWidth * 4;

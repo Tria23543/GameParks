@@ -404,8 +404,23 @@ static NSString * const GPBoxArtSignatureDefaultsKey = @"GPBoxArtListSignaturesV
             // app re-queue, and a fresh retriever is stamped with
             // the current epoch, so it can only go stale on a NEW
             // signature change — the re-queue cannot loop.
-            if (![finished isCancelled]
-                && finished.retrievalOutcome == AppAssetRetrievalOutcomeStaleWriteDeleted) {
+            // GP v2.10 (F-01): the non-cancellation condition is
+            // dropped. The retriever reports this outcome on EITHER
+            // arm of its post-write re-check (epoch-stale OR
+            // cancelled), and the signature-change pass cancels the
+            // stale retriever's key as a matter of course — so the
+            // gate as written in v2.9 stranded exactly the
+            // bump+cancel interleaving it existed to heal: fresh
+            // art deleted, nothing re-queued. The outcome now
+            // always re-queues. Termination, restated correctly
+            // (the v2.9 sentence above covers only the epoch arm):
+            // a re-queued retriever reports the stale outcome
+            // again only if a NEW bump or cancel event lands
+            // during its write window — both are external events,
+            // and this pass itself, with the signature unchanged,
+            // neither bumps the epoch nor cancels any retriever,
+            // so no link in the chain generates the next one.
+            if (finished.retrievalOutcome == AppAssetRetrievalOutcomeStaleWriteDeleted) {
                 TemporaryHost *host = finished.host;
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [manager retrieveAssetsFromHost:host];

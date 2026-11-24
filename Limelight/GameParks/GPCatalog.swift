@@ -349,6 +349,32 @@ enum GPCatalog {
                         let factor = (10_000_000 / pixels).squareRoot()
                         drawSize = CGSize(width: (drawSize.width * factor).rounded(),
                                           height: (drawSize.height * factor).rounded())
+                        // GP v2.10 (F-02): flooring the short
+                        // dimension at 1 (as the probe size below
+                        // does) breaks the cap at extreme aspect
+                        // ratios — the scaled long dimension runs
+                        // to ~sqrt(cap x aspect), so a
+                        // 100,000,000x1 source would allocate
+                        // ~31.6M px (~126 MB), 3.16x the cap.
+                        // Floor both dimensions here and clamp the
+                        // long one so width x height <= cap at any
+                        // aspect ratio — the same clamp the
+                        // retriever applies (AppAssetRetriever.m),
+                        // so both sides share one effective bound,
+                        // for the probe context below and for the
+                        // renderer that draws at drawSize. The
+                        // short dimension here is at most ~3163
+                        // (the scaled short side of any over-cap
+                        // image), so the division cannot yield 0.
+                        drawSize.width = max(1, drawSize.width)
+                        drawSize.height = max(1, drawSize.height)
+                        if drawSize.width * drawSize.height > 10_000_000 {
+                            if drawSize.width >= drawSize.height {
+                                drawSize.width = (10_000_000 / drawSize.height).rounded(.down)
+                            } else {
+                                drawSize.height = (10_000_000 / drawSize.width).rounded(.down)
+                            }
+                        }
                     }
                     // GP v2.7 (C-04): UIImage(data:) is lazy — a
                     // header-valid but truncated file returns a
