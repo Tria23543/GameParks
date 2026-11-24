@@ -137,9 +137,68 @@ enum GPCatalog {
                           sourceTag: nil, detailLine: nil)
     }
 
+    /// The art a game tile shows, in priority order:
+    /// 1. the box art the host itself serves (Sunshine supplies an
+    ///    image per application), fetched and disk-cached by
+    ///    upstream's AppAssetManager;
+    /// 2. a bundled cover matched by the game's name;
+    /// 3. nil — the views render their title tile instead.
+    /// While host art is still arriving, the bundled cover (or the
+    /// tile) is the placeholder.
     static func coverImage(for app: TemporaryApp) -> UIImage? {
+        if let art = hostBoxArt(for: app) {
+            return art
+        }
         guard let name = info(for: app).coverImageName else { return nil }
         return UIImage(named: name)
+    }
+
+    // MARK: - Host box art
+
+    private static let boxArtCache = NSCache<NSString, UIImage>()
+    private static let boxArtDecodeQueue = DispatchQueue(label: "com.gameparks.boxart", qos: .userInitiated)
+    /// Keys whose decode has been kicked off (main-thread confined:
+    /// coverImage is only ever called from screen rebuilds). A key
+    /// stays in the set after a failed decode so a bad file is not
+    /// retried on every rebuild.
+    private static var boxArtRequested = Set<NSString>()
+
+    /// The decoded host box art for an app, or nil if it isn't
+    /// decoded yet. The PNG itself is fetched from the host by
+    /// AppAssetManager (driven by GPSessionController after each
+    /// app-list load) into the on-disk cache; here it is only read
+    /// and decoded — off the main thread, force-decoded, so a
+    /// scrolling list never pays the decode cost. When a decode
+    /// lands, the normal app-list notification re-renders the
+    /// screens and they pick the image up from the memory cache.
+    static func hostBoxArt(for app: TemporaryApp) -> UIImage? {
+        guard let uuid = app.host?.uuid, let appID = app.id else { return nil }
+        let key = "\(uuid)/\(appID)" as NSString
+        if let cached = boxArtCache.object(forKey: key) {
+            return cached
+        }
+        let path = AppAssetManager.boxArtPath(for: app)
+        guard FileManager.default.fileExists(atPath: path),
+              !boxArtRequested.contains(key) else { return nil }
+        boxArtRequested.insert(key)
+        let host = app.host
+        boxArtDecodeQueue.async {
+            var decoded: UIImage?
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+               let image = UIImage(data: data) {
+                // Force the decode here, on this queue, by drawing
+                // the image once (the same trick upstream's
+                // loadBoxArtForCaching uses against scroll jank).
+                let renderer = UIGraphicsImageRenderer(size: image.size)
+                decoded = renderer.image { _ in image.draw(at: .zero) }
+            }
+            guard let decoded = decoded else { return }
+            boxArtCache.setObject(decoded, forKey: key)
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .GPAppListChanged, object: host)
+            }
+        }
+        return nil
     }
 
     /// Lowercase, punctuation-stripped, whitespace-collapsed name

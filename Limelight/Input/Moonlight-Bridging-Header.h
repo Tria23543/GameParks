@@ -15,6 +15,7 @@
 #import "ServerInfoResponse.h"
 #import "AppListResponse.h"
 #import "ConnectionHelper.h"
+#import "AppAssetManager.h"
 #import "WakeOnLanManager.h"
 #import "CryptoManager.h"
 #import "IdManager.h"

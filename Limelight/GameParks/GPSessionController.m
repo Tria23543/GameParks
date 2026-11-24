@@ -22,6 +22,7 @@
 #import "ServerInfoResponse.h"
 #import "AppListResponse.h"
 #import "ConnectionHelper.h"
+#import "AppAssetManager.h"
 #import "PairManager.h"
 #import "WakeOnLanManager.h"
 #import "StreamConfiguration.h"
@@ -40,7 +41,7 @@ NSNotificationName const GPAppListChangedNotification = @"GPAppListChanged";
 NSNotificationName const GPHostInfoErrorNotification = @"GPHostInfoError";
 NSString * const GPHostInfoErrorMessageKey = @"message";
 
-@interface GPSessionController () <DiscoveryCallback, PairCallback>
+@interface GPSessionController () <DiscoveryCallback, PairCallback, AppAssetCallback>
 @end
 
 @implementation GPSessionController {
@@ -60,6 +61,9 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     GPSubnetScanner *_scanner;
     BOOL _scanInProgress;
     NSDate *_lastScanStart;
+
+    AppAssetManager *_assetManager;
+    BOOL _assetRefreshScheduled;
 
     BOOL _started;
     BOOL _streamActive;
@@ -132,6 +136,10 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 
     _discMan = [[DiscoveryManager alloc] initWithHosts:_hosts andCallback:self];
     [_discMan startDiscovery];
+
+    // GP: upstream's box-art fetcher, with this session as its
+    // callback (upstream: MainFrameViewController's _appManager).
+    _assetManager = [[AppAssetManager alloc] initWithCallback:self];
 
     _scanner = [[GPSubnetScanner alloc] init];
     [self scanLocalNetworkForce:YES];
@@ -249,6 +257,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 - (void)appWillResignActive {
     [_discMan stopDiscovery];
     [_scanner cancel];
+    [_assetManager stopRetrieving];
 }
 
 #pragma mark - DiscoveryCallback
@@ -561,7 +570,33 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             [self->_appListErrors removeObjectForKey:host.uuid];
             [self postAppListChanged:host];
             [self postHostsChanged];
+            // GP: with a fresh app list in hand, fetch any box art
+            // the host serves that isn't already cached on disk
+            // (upstream calls retrieveAssetsFromHost the same way;
+            // the retrievers run in the background, max 4 at once).
+            [self->_assetManager retrieveAssetsFromHost:host];
         });
+    });
+}
+
+/// AppAssetCallback — a box-art file has landed in the on-disk
+/// cache (AppAssetRetriever delivers this on the main thread).
+/// The screens re-render through the normal app-list notification;
+/// arrivals are coalesced so a burst of covers produces one
+/// rebuild, not one per image (and the screens' own scroll-aware
+/// deferral holds it until scrolling ends regardless).
+- (void)receivedAssetForApp:(TemporaryApp *)app {
+    if (_assetRefreshScheduled) {
+        return;
+    }
+    _assetRefreshScheduled = YES;
+    TemporaryHost *host = app.host;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        self->_assetRefreshScheduled = NO;
+        if (host != nil) {
+            [self postAppListChanged:host];
+        }
     });
 }
 
