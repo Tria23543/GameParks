@@ -12,6 +12,10 @@ import UIKit
 final class GPStatsViewController: GPBaseViewController {
     private let stack = UIStackView()
 
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -48,6 +52,10 @@ final class GPStatsViewController: GPBaseViewController {
     }
 
     @objc private func rebuild() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.rebuild() }
+            return
+        }
         guard isViewLoaded else { return }
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let stats = GPStats.shared
@@ -70,7 +78,10 @@ final class GPStatsViewController: GPBaseViewController {
         let dataText: String
         let dataMB = stats.totalDataMB()
         if dataMB >= 1000 {
-            dataText = String(format: "%.1f GB", dataMB / 1000.0)
+            dataText = String(format: "%.1f GB", locale: Locale(identifier: "en_US_POSIX"), dataMB / 1000.0)
+        } else if dataMB < 10 {
+            // One decimal: 0.9 MB of streaming must not read as "0 MB".
+            dataText = String(format: "%.1f MB", locale: Locale(identifier: "en_US_POSIX"), dataMB)
         } else {
             dataText = "\(Int(dataMB)) MB"
         }
@@ -102,7 +113,8 @@ final class GPStatsViewController: GPBaseViewController {
         }
 
         // This week
-        stack.addArrangedSubview(GPSectionHeader(title: "This week", subtitle: "\(stats.sessionsThisWeekCount()) sessions"))
+        let weekCount = stats.sessionsThisWeekCount()
+        stack.addArrangedSubview(GPSectionHeader(title: "This week", subtitle: weekCount == 1 ? "1 session" : "\(weekCount) sessions"))
         stack.addArrangedSubview(weekChart(counts: stats.sessionsThisWeek()))
 
         stack.addArrangedSubview(GPLabel("Counted on this phone from your GameParks sessions — playtime, sessions and streamed data are recorded as you play.",
@@ -132,15 +144,18 @@ final class GPStatsViewController: GPBaseViewController {
     }
 
     private func mostPlayedRow(appKey: String, seconds: TimeInterval) -> UIView {
-        // Resolve the app key (hostUUID/appId) back to a game name.
+        // Resolve the app key (hostUUID/discriminator) back to a game
+        // name — on the key's OWN host. The old code ignored the host
+        // part and searched every host for the suffix, so two hosts
+        // sharing an app id showed the first host's game name for the
+        // other host's playtime.
         var name = "Game"
-        if let slash = appKey.lastIndex(of: "/") {
-            let appId = String(appKey[appKey.index(after: slash)...])
-            for host in GPEngine.shared.hosts {
-                if let app = GPEngine.shared.sortedApps(for: host).first(where: { $0.id == appId }) {
-                    name = app.name ?? name
-                    break
-                }
+        if let slash = appKey.firstIndex(of: "/") {
+            let hostUUID = String(appKey[..<slash])
+            if let host = GPEngine.shared.hosts.first(where: { $0.uuid == hostUUID }),
+               let app = host.appList.compactMap({ $0 as? TemporaryApp })
+                   .first(where: { GPStats.appKey(host: host, app: $0) == appKey }) {
+                name = app.name ?? name
             }
         }
         let row = UIView()
@@ -148,8 +163,10 @@ final class GPStatsViewController: GPBaseViewController {
         row.round(14)
         let nameLabel = GPLabel(name, font: GPTheme.body(14.5, weight: .semibold), color: GPTheme.ink, lines: 2)
         let hoursLabel = GPLabel(GPFormatPlaytime(seconds), font: GPTheme.display(14, weight: .bold), color: GPTheme.accent)
+        hoursLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         let inner = UIStackView(arrangedSubviews: [nameLabel, hoursLabel])
         inner.axis = .horizontal
+        inner.spacing = 10
         inner.alignment = .center
         inner.isLayoutMarginsRelativeArrangement = true
         inner.layoutMargins = UIEdgeInsets(top: 13, left: 16, bottom: 13, right: 16)
@@ -175,7 +192,9 @@ final class GPStatsViewController: GPBaseViewController {
         bars.distribution = .fillEqually
         bars.alignment = .bottom
         bars.spacing = 10
-        for (index, count) in counts.enumerated() {
+        // Zip with the day names: indexing days[] by the counts'
+        // enumeration crashed if the counts ever came back ≠ 7.
+        for (day, count) in zip(days, counts) {
             let column = UIStackView()
             column.axis = .vertical
             column.spacing = 6
@@ -187,7 +206,7 @@ final class GPStatsViewController: GPBaseViewController {
             bar.widthAnchor.constraint(equalToConstant: 22).isActive = true
             bar.heightAnchor.constraint(equalToConstant: height).isActive = true
             column.addArrangedSubview(bar)
-            column.addArrangedSubview(GPLabel(days[index], font: GPTheme.body(10.5, weight: .bold), color: GPTheme.dim))
+            column.addArrangedSubview(GPLabel(day, font: GPTheme.body(10.5, weight: .bold), color: GPTheme.dim))
             bars.addArrangedSubview(column)
         }
         bars.isLayoutMarginsRelativeArrangement = true

@@ -16,6 +16,7 @@ final class GPConnectingViewController: GPBaseViewController {
     private let subtitleLabel = GPLabel("", font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut)
     private var stepRows: [(row: UIView, check: UILabel, label: UILabel)] = []
     private var finished = false
+    private var started = false
 
     init(app: TemporaryApp) {
         self.app = app
@@ -41,7 +42,12 @@ final class GPConnectingViewController: GPBaseViewController {
         dim.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(dim)
 
-        subtitleLabel.text = "\(app.name ?? "") · \(app.host?.name ?? "")"
+        // Join only the parts that exist — a missing name used to
+        // leave a stray " · " in the subtitle.
+        subtitleLabel.text = [app.name, app.host?.name]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
 
         let stepsStack = UIStackView()
         stepsStack.axis = .vertical
@@ -101,6 +107,11 @@ final class GPConnectingViewController: GPBaseViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // Run once: re-appearing (an alert dismissed, the screen
+        // re-shown) used to restart the whole sequence — duplicate
+        // wake polls, duplicate running-app alerts, duplicate streams.
+        guard !started else { return }
+        started = true
         runConnectionSequence()
     }
 
@@ -118,8 +129,10 @@ final class GPConnectingViewController: GPBaseViewController {
         }
         let engine = GPEngine.shared
 
-        // Step 1: the host must be awake and online.
-        if host.state == .offline {
+        // Step 1: the host must be awake and online. An .unknown host
+        // (never successfully polled) takes the same path — it used
+        // to be passed as "awake" and failed later, inside the stream.
+        if host.state == .offline || host.state == .unknown {
             engine.wake(host)
             waitForHostOnline(host, attempts: 12) { [weak self] online in
                 guard let self = self else { return }
@@ -127,7 +140,7 @@ final class GPConnectingViewController: GPBaseViewController {
                     self.markStep(0)
                     self.startGameSteps()
                 } else {
-                    self.fail(message: "\(host.name) did not wake up. Check it is plugged in and Wake-on-LAN is on, then try again.")
+                    self.fail(message: "\(host.name) did not wake up. Check that it is plugged in and Wake-on-LAN is on, then try again.")
                 }
             }
         } else {
@@ -154,20 +167,37 @@ final class GPConnectingViewController: GPBaseViewController {
     }
 
     private func startGameSteps() {
-        guard let host = app.host, let nav = navigationController else { return }
+        guard !finished else { return }
+        guard let host = app.host else {
+            fail(message: "This game's PC is no longer available.")
+            return
+        }
+        guard let nav = navigationController else {
+            fail(message: "The stream could not be started. Go back and try again.")
+            return
+        }
         let engine = GPEngine.shared
 
-        // Another game already running on the host? Ask before quitting it.
-        if let running = engine.runningApp(for: host), running.id != app.id {
-            let alert = UIAlertController(title: running.name,
+        // Another game already running on the host? Ask before quitting
+        // it. The check uses the FULL app list (hidden games included):
+        // a hidden running game blocks a launch just the same.
+        if let running = engine.anyRunningApp(for: host), running.id != app.id {
+            let alert = UIAlertController(title: "Another game is running",
                                           message: "\(running.name ?? "Another game") is currently running on \(host.name).",
                                           preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
-                self.navigationController?.popViewController(animated: true)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+                self?.navigationController?.popViewController(animated: true)
             })
-            alert.addAction(UIAlertAction(title: "Quit and start \(app.name ?? "this game")", style: .destructive) { _ in
-                engine.quitCurrentApp(on: host) { [weak self] in
-                    self?.startGameSteps()
+            alert.addAction(UIAlertAction(title: "Quit and start \(app.name ?? "this game")", style: .destructive) { [weak self] _ in
+                engine.quitCurrentApp(on: host) { [weak self] quitOk in
+                    guard let self = self else { return }
+                    if quitOk {
+                        self.startGameSteps()
+                    } else {
+                        // A failed quit used to be treated as success
+                        // and the launch ran into a busy host.
+                        self.fail(message: "\(running.name ?? "The running game") could not be quit. Quit it on the PC, then try again.")
+                    }
                 }
             })
             present(alert, animated: true)
@@ -177,18 +207,31 @@ final class GPConnectingViewController: GPBaseViewController {
         markStep(1)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             guard let self = self, !self.finished else { return }
-            self.markStep(2)
-            self.markStep(3)
+            // Re-check at the last moment: a host that went offline or
+            // unpaired during the steps above must not get a stream
+            // built on a stale address — and after this screen has
+            // replaced itself, fail() could never have reported it.
+            guard host.state == .online, host.pairState == .paired else {
+                self.fail(message: "The connection to \(host.name) was lost. Make sure the PC is online and paired, then try again.")
+                return
+            }
             guard let streamVC = engine.makeStreamViewController(for: self.app) else {
                 self.fail(message: "The stream could not be created. Make sure the PC is paired and online.")
                 return
             }
+            // Steps 2 and 3 complete only now — when the stream screen
+            // actually exists — not on a fixed timer.
+            self.markStep(2)
+            self.markStep(3)
             self.finished = true
             engine.registerStreamStart(app: self.app, viewController: streamVC)
             var stack = nav.viewControllers
             if let index = stack.firstIndex(of: self) {
                 stack[index] = streamVC
             } else {
+                // Never leave this (finished, dead) screen underneath
+                // the stream in the stack.
+                stack.removeAll { $0 === self }
                 stack.append(streamVC)
             }
             nav.setViewControllers(stack, animated: true)
@@ -196,12 +239,21 @@ final class GPConnectingViewController: GPBaseViewController {
     }
 
     private func fail(message: String) {
+        // Mark finished FIRST so pending polls/blocks cannot call
+        // fail() (or worse, startGameSteps) again afterwards.
+        finished = true
         titleLabel.text = "Could not connect"
         let alert = UIAlertController(title: "Could not connect", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
-            self.navigationController?.popViewController(animated: true)
+        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+            self?.navigationController?.popViewController(animated: true)
         })
-        present(alert, animated: true)
+        if view.window != nil, presentedViewController == nil {
+            present(alert, animated: true)
+        } else {
+            // Nothing can present from here (already covered, or off-
+            // screen): leave directly instead of stranding the user.
+            navigationController?.popViewController(animated: true)
+        }
     }
 
     @objc private func cancelTapped() {

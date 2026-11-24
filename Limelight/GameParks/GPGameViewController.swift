@@ -11,7 +11,15 @@ import UIKit
 
 final class GPGameViewController: GPBaseViewController {
     private let app: TemporaryApp
-    private var favouriteButton: UIButton!
+    // Created at declaration, configured in viewDidLoad: as an
+    // implicitly-unwrapped optional assigned halfway through
+    // viewDidLoad, any early return left it nil for later calls.
+    private var favouriteButton = UIButton(type: .system)
+    private var playtimeValueLabel: UILabel?
+    private var lastPlayedValueLabel: UILabel?
+    private var streamValueLabel: UILabel?
+    private var runningNoteLabel: UILabel?
+    private var playInFlight = false
 
     init(app: TemporaryApp) {
         self.app = app
@@ -25,12 +33,11 @@ final class GPGameViewController: GPBaseViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        guard let host = app.host else { return }
         let meta = GPGameMeta.meta(forAppName: app.name ?? "")
         let engine = GPEngine.shared
-        let appKey = GPStats.appKey(host: host, app: app)
 
         let scrollView = UIScrollView()
+        scrollView.delaysContentTouches = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scrollView)
         let stack = UIStackView()
@@ -38,6 +45,29 @@ final class GPGameViewController: GPBaseViewController {
         stack.spacing = 20
         stack.translatesAutoresizingMaskIntoConstraints = false
         scrollView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -28),
+            stack.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
+        ])
+
+        guard let host = app.host else {
+            // The PC was removed while this page exists (or its host
+            // never resolved): an explained placeholder, not the
+            // completely blank page this used to render.
+            let title = GPLabel(app.name ?? "Game", font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink, lines: 2)
+            let note = GPLabel("This game's PC is no longer available. It may have been removed — go back and pick it up again from Home if it reappears.",
+                               font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut, lines: 0)
+            stack.addArrangedSubview(padded(title, insets: UIEdgeInsets(top: 24, left: 20, bottom: 0, right: 20)))
+            stack.addArrangedSubview(padded(note, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
+            return
+        }
 
         // Hero art
         let hero = UIImageView()
@@ -63,7 +93,6 @@ final class GPGameViewController: GPBaseViewController {
         // Play button + favourite
         let playButton = GPPlayButton(title: "Play on \(host.name)")
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
-        favouriteButton = UIButton(type: .system)
         favouriteButton.tintColor = GPTheme.accent
         favouriteButton.backgroundColor = GPTheme.panel
         favouriteButton.round(16)
@@ -77,11 +106,13 @@ final class GPGameViewController: GPBaseViewController {
         favouriteButton.widthAnchor.constraint(equalToConstant: 54).isActive = true
         stack.addArrangedSubview(playRow)
 
-        // Stats strip
-        let settings = engine.currentSettings()
-        let streamLabel = "\(settings?.height?.intValue ?? 1080)p\(settings?.framerate?.intValue ?? 60)"
-        let playtime = GPStats.shared.playtime(forAppKey: appKey)
-        let lastPlayed = GPStats.shared.lastPlayed(forAppKey: appKey)
+        // Stats strip (values refreshed by updateStats on every appearance)
+        let playtimeLabel = GPLabel("—", font: GPTheme.display(16, weight: .bold), color: GPTheme.ink)
+        let lastPlayedLabel = GPLabel("—", font: GPTheme.display(16, weight: .bold), color: GPTheme.ink)
+        let streamLabel = GPLabel("—", font: GPTheme.display(16, weight: .bold), color: GPTheme.ink)
+        playtimeValueLabel = playtimeLabel
+        lastPlayedValueLabel = lastPlayedLabel
+        streamValueLabel = streamLabel
         let statsCard = UIStackView()
         statsCard.axis = .horizontal
         statsCard.distribution = .fillEqually
@@ -89,9 +120,9 @@ final class GPGameViewController: GPBaseViewController {
         statsCard.round(16)
         statsCard.isLayoutMarginsRelativeArrangement = true
         statsCard.layoutMargins = UIEdgeInsets(top: 14, left: 8, bottom: 14, right: 8)
-        statsCard.addArrangedSubview(statColumn(value: playtime > 0 ? GPFormatPlaytime(playtime) : "—", label: "Played"))
-        statsCard.addArrangedSubview(statColumn(value: lastPlayed != nil ? GPFormatLastPlayed(lastPlayed!) : "—", label: "Last played"))
-        statsCard.addArrangedSubview(statColumn(value: streamLabel, label: "Stream"))
+        statsCard.addArrangedSubview(statColumn(valueLabel: playtimeLabel, label: "Played"))
+        statsCard.addArrangedSubview(statColumn(valueLabel: lastPlayedLabel, label: "Last played"))
+        statsCard.addArrangedSubview(statColumn(valueLabel: streamLabel, label: "Stream"))
         let statsContainer = padded(statsCard, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20))
         stack.addArrangedSubview(statsContainer)
 
@@ -101,35 +132,58 @@ final class GPGameViewController: GPBaseViewController {
             stack.addArrangedSubview(padded(label, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
         }
 
-        // This game
+        // This game. The row copy describes what tapping actually
+        // does — it used to advertise per-game resolution/bitrate and
+        // launch flags the app does not have.
         stack.addArrangedSubview(padded(GPSectionHeader(title: "This game"), insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
-        let perGame = GPRow(title: "Per-game settings", subtitle: "Resolution & bitrate just for this title", value: "Open")
+        let perGame = GPRow(title: "Per-game settings", subtitle: "Uses your global stream settings", value: "Info")
         perGame.addTarget(self, action: #selector(perGameTapped), for: .touchUpInside)
         stack.addArrangedSubview(padded(perGame, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
-        let launchOptions = GPRow(title: "Launch options", subtitle: "Start fullscreen · skip intro videos", value: "Edit")
+        let launchOptions = GPRow(title: "Launch options", subtitle: "Set per-game launch flags in Sunshine", value: "Info")
         launchOptions.addTarget(self, action: #selector(launchOptionsTapped), for: .touchUpInside)
         stack.addArrangedSubview(padded(launchOptions, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
 
-        if engine.runningApp(for: host)?.id == app.id {
-            let runningNote = GPLabel("Running now on \(host.name) — Play resumes it.", font: GPTheme.body(13, weight: .bold), color: GPTheme.live, lines: 2)
-            stack.addArrangedSubview(padded(runningNote, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
-        }
+        let note = GPLabel("", font: GPTheme.body(13, weight: .bold), color: GPTheme.live, lines: 2)
+        runningNoteLabel = note
+        stack.addArrangedSubview(padded(note, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
 
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -28),
-            stack.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
-        ])
+        updateStats()
     }
 
-    private func statColumn(value: String, label: String) -> UIView {
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        playInFlight = false
+        updateStats()
+    }
+
+    /// Playtime, last-played, stream summary and the running note are
+    /// computed from live state — they used to be frozen at whatever
+    /// they were when the page was first built.
+    private func updateStats() {
+        guard let host = app.host else { return }
+        let engine = GPEngine.shared
+        let appKey = GPStats.appKey(host: host, app: app)
+        let playtime = GPStats.shared.playtime(forAppKey: appKey)
+        playtimeValueLabel?.text = playtime > 0 ? GPFormatPlaytime(playtime) : "—"
+        if let lastPlayed = GPStats.shared.lastPlayed(forAppKey: appKey) {
+            lastPlayedValueLabel?.text = GPFormatLastPlayed(lastPlayed)
+        } else {
+            lastPlayedValueLabel?.text = "—"
+        }
+        let settings = engine.currentSettings()
+        streamValueLabel?.text = "\(settings?.height?.intValue ?? 1080)p\(settings?.framerate?.intValue ?? 60)"
+        if engine.runningApp(for: host)?.id == app.id {
+            runningNoteLabel?.text = "Running now on \(host.name) — Play resumes it."
+            runningNoteLabel?.isHidden = false
+        } else {
+            runningNoteLabel?.text = nil
+            runningNoteLabel?.isHidden = true
+        }
+    }
+
+    private func statColumn(valueLabel: UILabel, label: String) -> UIView {
         let stack = UIStackView(arrangedSubviews: [
-            GPLabel(value, font: GPTheme.display(16, weight: .bold), color: GPTheme.ink),
+            valueLabel,
             GPLabel(label, font: GPTheme.body(11, weight: .semibold), color: GPTheme.dim),
         ])
         stack.axis = .vertical
@@ -164,20 +218,34 @@ final class GPGameViewController: GPBaseViewController {
     }
 
     @objc private func playTapped() {
+        // A double-tap used to push two connecting screens, each
+        // starting its own connection sequence (double wakes, double
+        // running-app alerts).
+        guard !playInFlight else { return }
         guard let host = app.host else { return }
         let engine = GPEngine.shared
         if host.pairState != .paired {
-            engine.activateHost(host, userInitiated: true)
-            showMessage(title: "Pairing", message: "Pair with \(host.name) first — one PIN, entered once — then press Play again.")
+            if host.state == .online {
+                // The pairing flow is global: the progress dialog and
+                // then the PIN dialog appear on their own. The old
+                // "Pairing" message raced that PIN dialog for the same
+                // screen and told her to press Play again even though
+                // pairing was already starting.
+                engine.activateHost(host, userInitiated: true)
+            } else {
+                engine.activateHost(host, userInitiated: true)
+                showMessage(title: "Not paired yet", message: "\(host.name) needs to be online and paired before games can start. Wake it from the Host tab, pair once with a PIN, then press Play.")
+            }
             return
         }
+        playInFlight = true
         let connecting = GPConnectingViewController(app: app)
         navigationController?.pushViewController(connecting, animated: true)
     }
 
     @objc private func perGameTapped() {
         showMessage(title: "Per-game settings",
-                    message: "This title uses your global stream settings for now — change them any time in the Settings tab. Per-game overrides are on the GameParks list for a future update.")
+                    message: "This title uses your global stream settings for now — change them anytime in the Settings tab. Per-game overrides are on the GameParks list for a future update.")
     }
 
     @objc private func launchOptionsTapped() {

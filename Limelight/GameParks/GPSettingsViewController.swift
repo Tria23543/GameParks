@@ -11,7 +11,10 @@ import UIKit
 
 final class GPSettingsViewController: GPBaseViewController {
     private let stack = UIStackView()
-    private var presetCards: [Int: UIView] = [:]
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     private struct StreamState {
         var width = 1920
@@ -66,6 +69,10 @@ final class GPSettingsViewController: GPBaseViewController {
     }
 
     private func loadState() {
+        // Start from defaults every load: if the stored settings are
+        // ever unavailable, the screen must not render (or re-save)
+        // stale values from a previous load.
+        state = StreamState()
         let engine = GPEngine.shared
         if let settings = engine.currentSettings() {
             state.width = settings.width?.intValue ?? 1920
@@ -76,7 +83,9 @@ final class GPSettingsViewController: GPBaseViewController {
             state.audioChannels = settings.audioConfig?.intValue ?? 2
             state.onscreenControls = settings.onscreenControls?.intValue ?? 2
         }
-        state.codec = UInt32(engine.currentCodecPref())
+        // Clamp: a corrupt or legacy stored preference must not trap
+        // the UInt32 conversion and crash Settings on load.
+        state.codec = UInt32(max(0, min(3, engine.currentCodecPref())))
     }
 
     private func persist() {
@@ -87,10 +96,13 @@ final class GPSettingsViewController: GPBaseViewController {
     }
 
     @objc private func rebuild() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.rebuild() }
+            return
+        }
         guard isViewLoaded else { return }
         loadState()
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        presetCards.removeAll()
         let engine = GPEngine.shared
         let host = engine.selectedHost
 
@@ -106,15 +118,13 @@ final class GPSettingsViewController: GPBaseViewController {
             headerSubtitleText = "GameParks · no PC paired yet"
         }
         header.addArrangedSubview(GPLabel(headerSubtitleText,
-                                          font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut))
+                                          font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut, lines: 2))
         stack.addArrangedSubview(header)
 
         // Stream presets
         stack.addArrangedSubview(sectionTitle("Stream presets"))
         for (index, preset) in presets.enumerated() {
-            let card = makePresetCard(index: index, preset: preset)
-            presetCards[index] = card
-            stack.addArrangedSubview(card)
+            stack.addArrangedSubview(makePresetCard(index: index, preset: preset))
         }
 
         // Stream
@@ -123,7 +133,7 @@ final class GPSettingsViewController: GPBaseViewController {
         resolutionRow.addTarget(self, action: #selector(resolutionTapped), for: .touchUpInside)
         stack.addArrangedSubview(resolutionRow)
 
-        let bitrateRow = GPRow(title: "Bitrate", subtitle: "Higher = sharper picture", value: "\(state.bitrateKbps / 1000) Mb/s")
+        let bitrateRow = GPRow(title: "Bitrate", subtitle: "Higher = sharper picture", value: bitrateText())
         bitrateRow.addTarget(self, action: #selector(bitrateTapped), for: .touchUpInside)
         stack.addArrangedSubview(bitrateRow)
 
@@ -149,7 +159,7 @@ final class GPSettingsViewController: GPBaseViewController {
         micRow.toggle.addTarget(self, action: #selector(micToggled(_:)), for: .valueChanged)
         stack.addArrangedSubview(micRow)
 
-        let surroundRow = GPRow(title: "Surround audio", subtitle: "5.1 passthrough", value: state.audioChannels >= 6 ? "5.1" : "Stereo")
+        let surroundRow = GPRow(title: "Surround audio", subtitle: "Surround passthrough", value: surroundName())
         surroundRow.addTarget(self, action: #selector(surroundTapped), for: .touchUpInside)
         stack.addArrangedSubview(surroundRow)
 
@@ -158,6 +168,7 @@ final class GPSettingsViewController: GPBaseViewController {
         let controllerRow = GPRow(title: "Bluetooth controller",
                                   subtitle: engine.bluetoothControllerConnected ? "Connected · Xbox layout" : "Not connected — pair it in iOS Settings",
                                   value: engine.bluetoothControllerConnected ? "Paired" : "")
+        controllerRow.showsChevron = false // Status only — nothing to open.
         stack.addArrangedSubview(controllerRow)
 
         let oscRow = GPRow(title: "On-screen controls", subtitle: "Touch sticks & buttons", value: oscName())
@@ -180,9 +191,14 @@ final class GPSettingsViewController: GPBaseViewController {
         stack.addArrangedSubview(sectionTitle("Hosts"))
         if let host = host {
             let hostSubtitle: String
+            // Bind the ping ONCE: samples update asynchronously, and
+            // the old code evaluated ping(for:) twice and force-
+            // unwrapped the second result — a crash if they cleared
+            // in between.
+            let ping = engine.ping(for: host)
             switch (host.state, host.pairState) {
             case (.online, .paired):
-                hostSubtitle = "Paired · Sunshine\(engine.ping(for: host) != nil ? " · \(engine.ping(for: host)!) ms" : "")"
+                hostSubtitle = "Paired · Sunshine\(ping.map { " · \($0) ms" } ?? "")"
             case (.online, _):
                 hostSubtitle = "Online · not paired"
             case (.offline, _):
@@ -220,7 +236,12 @@ final class GPSettingsViewController: GPBaseViewController {
     }
 
     private func makePresetCard(index: Int, preset: (name: String, detail: String, width: Int, height: Int, fps: Int, bitrate: Int)) -> UIView {
-        let active = state.width == preset.width && state.height == preset.height && state.fps == preset.fps && state.bitrateKbps == preset.bitrate
+        var active = state.width == preset.width && state.height == preset.height && state.fps == preset.fps && state.bitrateKbps == preset.bitrate
+        if index == 0 {
+            // The Home Wi-Fi preset's detail promises "Auto codec":
+            // it is only active when the codec really is Auto.
+            active = active && state.codec == 0
+        }
         let card = UIControl()
         card.tag = index
         card.backgroundColor = GPTheme.panel
@@ -309,9 +330,28 @@ final class GPSettingsViewController: GPBaseViewController {
         }
     }
 
+    /// "20 Mb/s" for whole values; a stored non-round bitrate (the
+    /// legacy front-end's slider could save one) shows one decimal
+    /// instead of being silently truncated by integer division.
+    private func bitrateText() -> String {
+        if state.bitrateKbps % 1000 == 0 {
+            return "\(state.bitrateKbps / 1000) Mb/s"
+        }
+        return String(format: "%.1f Mb/s", locale: Locale(identifier: "en_US_POSIX"), Double(state.bitrateKbps) / 1000.0)
+    }
+
+    private func surroundName() -> String {
+        switch state.audioChannels {
+        case ..<6: return "Stereo"
+        case ..<8: return "5.1"
+        default: return "7.1"
+        }
+    }
+
     // MARK: - Actions
 
     @objc private func presetTapped(_ sender: UIControl) {
+        guard presets.indices.contains(sender.tag) else { return }
         let preset = presets[sender.tag]
         state.width = preset.width
         state.height = preset.height
@@ -377,6 +417,7 @@ final class GPSettingsViewController: GPBaseViewController {
         pickSheet(title: "Surround audio", options: [
             ("Stereo", { self.state.audioChannels = 2 }),
             ("5.1 surround", { self.state.audioChannels = 6 }),
+            ("7.1 surround", { self.state.audioChannels = 8 }),
         ])
     }
 
