@@ -113,6 +113,37 @@ import Foundation
         }
     }
 
+    /// GP v2.6 (B-12): synchronised hand-off for one validation
+    /// result. The discoverHost callback can land after the wait
+    /// below has timed out and validate has returned; the lock +
+    /// abandonment flag mean the orphaned block never writes the
+    /// result unsynchronised after abandonment. (This guards the
+    /// hand-off only — the probe-slot design itself is unchanged;
+    /// see A-59, still partial.)
+    private final class ValidateBox {
+        private let lock = NSLock()
+        private var stored: TemporaryHost?
+        private var abandoned = false
+
+        func store(_ host: TemporaryHost?) {
+            lock.lock()
+            if !abandoned { stored = host }
+            lock.unlock()
+        }
+
+        func abandon() {
+            lock.lock()
+            abandoned = true
+            lock.unlock()
+        }
+
+        var host: TemporaryHost? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+    }
+
     /// Runs DiscoveryManager.discoverHost on a side queue and waits
     /// with a bound. On timeout the probe is abandoned (nil); the
     /// orphaned request is left to time out on its own queue, so one
@@ -120,7 +151,7 @@ import Foundation
     private func validate(address: String, discoveryManager: DiscoveryManager,
                           isCurrent: @escaping () -> Bool) -> TemporaryHost? {
         let semaphore = DispatchSemaphore(value: 0)
-        var result: TemporaryHost?
+        let box = ValidateBox()
         DispatchQueue.global(qos: .userInitiated).async {
             // GP v2.5 (A-57): the token-aware variant re-checks the
             // sweep generation immediately before discoverHost would
@@ -128,14 +159,15 @@ import Foundation
             // finishes after this sweep was cancelled/superseded has
             // no discovery side effect.
             discoveryManager.discoverHost(address, withCallback: { host, _ in
-                result = host
+                box.store(host)
                 semaphore.signal()
             }, shouldAddToDiscovery: { isCurrent() })
         }
         guard semaphore.wait(timeout: .now() + Self.validationTimeout) == .success else {
+            box.abandon()
             return nil
         }
-        return result
+        return box.host
     }
 
     // MARK: - Subnet
