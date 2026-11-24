@@ -23,40 +23,60 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     StreamView* _view;
     id<ConnectionCallbacks> _callbacks;
     float _streamAspectRatio;
-    
+
     AVSampleBufferDisplayLayer* displayLayer;
     int videoFormat;
     int frameRate;
-    
+
     NSMutableArray *parameterSetBuffers;
     NSData *masteringDisplayColorVolume;
     NSData *contentLightLevelInfo;
     CMVideoFormatDescriptionRef formatDesc;
-    
+
     CADisplayLink* _displayLink;
     BOOL framePacing;
 }
 
-- (void)reinitializeDisplayLayer
+static void *GPViewBoundsContext = &GPViewBoundsContext;
+
+// GameParks: the display layer's geometry is computed from the stream
+// view's bounds. Upstream is landscape-only, so those bounds never
+// change after setup; GameParks pushes this view from a portrait app,
+// so the bounds change when the interface rotates into landscape.
+// Recompute the geometry whenever the view's bounds change.
+- (void)updateDisplayLayerGeometry
 {
-    CALayer *oldLayer = displayLayer;
-    
-    displayLayer = [[AVSampleBufferDisplayLayer alloc] init];
-    displayLayer.backgroundColor = [UIColor blackColor].CGColor;
-    
-    // Ensure the AVSampleBufferDisplayLayer is sized to preserve the aspect ratio
-    // of the video stream. We used to use AVLayerVideoGravityResizeAspect, but that
-    // respects the PAR encoded in the SPS which causes our computed video-relative
-    // touch location to be wrong in StreamView if the aspect ratio of the host
-    // desktop doesn't match the aspect ratio of the stream.
+    if (displayLayer == nil) {
+        return;
+    }
+
     CGSize videoSize;
     if (_view.bounds.size.width > _view.bounds.size.height * _streamAspectRatio) {
         videoSize = CGSizeMake(_view.bounds.size.height * _streamAspectRatio, _view.bounds.size.height);
     } else {
         videoSize = CGSizeMake(_view.bounds.size.width, _view.bounds.size.width / _streamAspectRatio);
     }
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     displayLayer.position = CGPointMake(CGRectGetMidX(_view.bounds), CGRectGetMidY(_view.bounds));
     displayLayer.bounds = CGRectMake(0, 0, videoSize.width, videoSize.height);
+    [CATransaction commit];
+}
+
+- (void)reinitializeDisplayLayer
+{
+    CALayer *oldLayer = displayLayer;
+
+    displayLayer = [[AVSampleBufferDisplayLayer alloc] init];
+    displayLayer.backgroundColor = [UIColor blackColor].CGColor;
+
+    // Ensure the AVSampleBufferDisplayLayer is sized to preserve the aspect ratio
+    // of the video stream. We used to use AVLayerVideoGravityResizeAspect, but that
+    // respects the PAR encoded in the SPS which causes our computed video-relative
+    // touch location to be wrong in StreamView if the aspect ratio of the host
+    // desktop doesn't match the aspect ratio of the stream.
+    [self updateDisplayLayerGeometry];
     displayLayer.videoGravity = AVLayerVideoGravityResize;
 
     // Hide the layer until we get an IDR frame. This ensures we
@@ -87,10 +107,37 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     framePacing = useFramePacing;
     
     parameterSetBuffers = [[NSMutableArray alloc] init];
-    
+
     [self reinitializeDisplayLayer];
-    
+
+    // GameParks: follow the stream view's bounds (see
+    // updateDisplayLayerGeometry) so the video re-fills the screen
+    // when the interface rotates after this renderer was created.
+    [_view addObserver:self
+            forKeyPath:@"bounds"
+               options:0
+               context:GPViewBoundsContext];
+
     return self;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary<NSKeyValueChangeKey, id> *)change
+                       context:(void *)context
+{
+    if (context == GPViewBoundsContext) {
+        // GameParks: the stream view was resized (rotation) — refit
+        // the video layer to the new bounds.
+        [self updateDisplayLayerGeometry];
+    } else {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+    }
+}
+
+- (void)dealloc
+{
+    [_view removeObserver:self forKeyPath:@"bounds" context:GPViewBoundsContext];
 }
 
 - (void)setupWithVideoFormat:(int)videoFormat width:(int)videoWidth height:(int)videoHeight frameRate:(int)frameRate

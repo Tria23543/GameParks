@@ -31,6 +31,9 @@ typedef NS_ENUM(NSInteger, OnScreenControlsLevel) {
 - (BOOL) handleTouchMovedEvent:(NSSet*)touches;
 - (void) setLevel:(OnScreenControlsLevel)level;
 - (OnScreenControlsLevel) getLevel;
+// GameParks: recompute the control layout from the view's current
+// frame (the frame captured at init may predate a rotation).
+- (void) refreshLayout;
 - (void) show;
 
 @end

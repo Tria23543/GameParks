@@ -45,6 +45,9 @@
     UIActivityIndicatorView *_spinner;
     StreamView *_streamView;
     UIScrollView *_scrollView;
+    // GameParks: visible in-stream exit affordance (upstream's only
+    // exits are an edge swipe and a gamepad combo — undiscoverable).
+    UIButton *_exitButton;
     BOOL _userIsInteracting;
     CGSize _keyboardSize;
     
@@ -223,7 +226,79 @@
     [self.view addSubview:_stageLabel];
     [self.view addSubview:_spinner];
     [self.view addSubview:_tipLabel];
+
+#if !TARGET_OS_TV
+    // GameParks: a visible, always-present way out of the stream.
+    // Upstream's exits are a left-edge swipe (whose tip label hides
+    // as soon as the stream connects) and a gamepad button combo —
+    // neither is discoverable for a first-time user. This button is
+    // the obvious one-tap exit; it performs the same return as the
+    // edge swipe. Positioned in viewWillLayoutSubviews.
+    _exitButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_exitButton setTitle:@"✕ End Stream" forState:UIControlStateNormal];
+    [_exitButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _exitButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    _exitButton.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
+    _exitButton.layer.cornerRadius = 15;
+    _exitButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
+    [_exitButton addTarget:self action:@selector(exitButtonPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_exitButton];
+#endif
 }
+
+- (void)exitButtonPressed {
+    Log(LOG_I, @"User tapped End Stream button");
+
+    [self returnToMainFrame];
+}
+
+#if !TARGET_OS_TV
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+
+    // GameParks: the navigation controller's interactive pop gesture
+    // also claims the left edge and would pop back to the connecting
+    // screen instead of ending the stream. Disable it while the
+    // stream screen is on top so upstream's left-edge exit swipe is
+    // the only edge gesture in play.
+    self.navigationController.interactivePopGestureRecognizer.enabled = NO;
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+
+    self.navigationController.interactivePopGestureRecognizer.enabled = YES;
+}
+
+// GameParks: this screen is pushed from a portrait app, so the view
+// (and everything sized from it in viewDidLoad — the stream view, the
+// centred labels) starts out with a portrait frame and only gets its
+// landscape bounds when the interface rotates. Upstream never sees
+// this because it is landscape-only from launch. Re-assert every
+// frame against the current bounds on each layout pass so the stream
+// fills the screen after rotation.
+- (void)viewWillLayoutSubviews {
+    [super viewWillLayoutSubviews];
+
+    CGRect bounds = self.view.bounds;
+    if (_streamView != nil) {
+        _streamView.frame = bounds;
+    }
+    if (_scrollView != nil) {
+        _scrollView.frame = bounds;
+    }
+    _stageLabel.center = CGPointMake(bounds.size.width / 2, bounds.size.height / 2);
+    _spinner.center = CGPointMake(bounds.size.width / 2, bounds.size.height / 2 - _stageLabel.frame.size.height - _spinner.frame.size.height);
+    _tipLabel.center = CGPointMake(bounds.size.width / 2, bounds.size.height * 0.9);
+    if (_exitButton != nil) {
+        [_exitButton sizeToFit];
+        CGRect buttonFrame = _exitButton.frame;
+        buttonFrame.origin.x = (bounds.size.width - buttonFrame.size.width) / 2;
+        buttonFrame.origin.y = self.view.safeAreaInsets.top + 6;
+        _exitButton.frame = buttonFrame;
+    }
+}
+#endif
 
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView {
     return _streamView;

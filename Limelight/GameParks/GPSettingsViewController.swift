@@ -44,7 +44,7 @@ enum GPSettingsStore {
             height: height ?? cur.height?.intValue ?? 1080,
             width: width ?? cur.width?.intValue ?? 1920,
             audioConfig: audioChannels ?? cur.audioConfig?.intValue ?? 2,
-            onscreenControls: onscreenControls ?? cur.onscreenControls?.intValue ?? 2,
+            onscreenControls: onscreenControls ?? cur.onscreenControls?.intValue ?? 1,
             optimizeGames: cur.optimizeGames,
             multiController: cur.multiController,
             swapABXYButtons: cur.swapABXYButtons,
@@ -178,9 +178,9 @@ final class GPSettingsViewController: GPBaseViewController {
 
         let oscRow = GPSwitchRow()
         oscRow.titleLabel.text = "On-screen controls"
-        oscRow.subtitle = "Touch sticks & buttons"
+        oscRow.subtitle = "Auto — hides when a controller is connected"
         oscRow.isOn = (cur?.onscreenControls?.intValue ?? 0) != 0
-        oscRow.onToggle = { isOn in GPSettingsStore.save(onscreenControls: isOn ? 2 : 0) }
+        oscRow.onToggle = { isOn in GPSettingsStore.save(onscreenControls: isOn ? 1 : 0) }
         dynamicStack.addArrangedSubview(oscRow)
 
         let deadzoneRow = GPSwitchRow()

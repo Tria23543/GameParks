@@ -38,7 +38,11 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     double accumulatedMouseDeltaY;
     
     UIResponder* touchHandler;
-    
+
+    // GameParks: last size seen by layoutSubviews, used to detect the
+    // portrait -> landscape resize after this view is created.
+    CGSize _lastLayoutSize;
+
     id<UserInteractionDelegate> interactionDelegate;
     NSTimer* interactionTimer;
     BOOL hasUserInteracted;
@@ -158,6 +162,19 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     else {
         // User is still touching the screen. Restart the timer.
         [self startInteractionTimer];
+    }
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    // GameParks: this view is created with the frame the stream screen
+    // has before the interface rotates into landscape, and the
+    // on-screen controls lay themselves out from that frame. When the
+    // size changes, make the controls lay out against the real size.
+    if (!CGSizeEqualToSize(self.bounds.size, _lastLayoutSize)) {
+        _lastLayoutSize = self.bounds.size;
+        [onScreenControls refreshLayout];
     }
 }
 

@@ -121,18 +121,7 @@ static float L3_Y;
     _swapABXY = streamConfig.swapABXYButtons;
     
     _iPad = ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad);
-    _controlArea = CGRectMake(0, 0, _view.frame.size.width, _view.frame.size.height);
-    if (_iPad)
-    {
-        // Cut down the control area on an iPad so the controls are more reachable
-        _controlArea.size.height = _view.frame.size.height / 2.0;
-        _controlArea.origin.y = _view.frame.size.height - _controlArea.size.height;
-    }
-    else
-    {
-        _controlArea.origin.x = _controlArea.size.width * EDGE_WIDTH;
-        _controlArea.size.width -= _controlArea.origin.x * 2;
-    }
+    [self computeControlArea];
     
     _aButton = [CALayer layer];
     _bButton = [CALayer layer];
@@ -160,8 +149,38 @@ static float L3_Y;
 
 - (void) show {
     _visible = YES;
-        
+
     [self updateControls];
+}
+
+// GameParks: the control area is derived from the view's frame, which
+// is captured at init. When the stream view is created before the
+// interface rotates into landscape (GameParks pushes it from a
+// portrait app), that captured frame is stale. Recompute the area
+// from the view's current frame and lay the controls out again.
+- (void) computeControlArea {
+    _controlArea = CGRectMake(0, 0, _view.frame.size.width, _view.frame.size.height);
+    if (_iPad)
+    {
+        // Cut down the control area on an iPad so the controls are more reachable
+        _controlArea.size.height = _view.frame.size.height / 2.0;
+        _controlArea.origin.y = _view.frame.size.height - _controlArea.size.height;
+    }
+    else
+    {
+        _controlArea.origin.x = _controlArea.size.width * EDGE_WIDTH;
+        _controlArea.size.width -= _controlArea.origin.x * 2;
+    }
+}
+
+- (void) refreshLayout {
+    [self computeControlArea];
+
+    // Only update controls if we're showing, otherwise
+    // show will do it for us.
+    if (_visible) {
+        [self updateControls];
+    }
 }
 
 - (void) setLevel:(OnScreenControlsLevel)level {

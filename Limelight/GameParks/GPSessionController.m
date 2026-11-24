@@ -108,6 +108,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     _opQueue = [[NSOperationQueue alloc] init];
 
     [self seedSettingsIfNeeded];
+    [self migrateOscToAutoIfNeeded];
 
     // Upstream retrieveSavedHosts, including the activeAddress fixups.
     DataManager *dataMan = [[DataManager alloc] init];
@@ -174,7 +175,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                               height:1080
                                width:1920
                          audioConfig:2
-                    onscreenControls:2
+                    onscreenControls:1 // OnScreenControlsLevelAuto — show only with no controller connected
                        optimizeGames:NO
                      multiController:YES
                      swapABXYButtons:NO
@@ -186,6 +187,47 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                    absoluteTouchMode:NO
                         statsOverlay:YES];
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPSeededSettingsV1"];
+}
+
+/// One-time migration (v2.1): GameParks v1–v2.0 seeded the on-screen
+/// controls level as 2, believing it meant "on". In the engine's enum
+/// 2 is OnScreenControlsLevelSimple — a fixed set of touch buttons
+/// that is always visible, controller or not. The intended behaviour
+/// is Auto (1): full touch controls only while no physical controller
+/// is connected, hidden (or reduced to the buttons the controller
+/// lacks) when one is. The GameParks settings UI only ever offered a
+/// plain on/off toggle whose "on" also wrote 2, so a stored 2 can
+/// only have come from GameParks itself, never from a user choosing
+/// Simple. Rewrite exactly that value to Auto, preserving every
+/// other setting; 0 (user turned controls off) and any other value
+/// are left untouched.
+- (void)migrateOscToAutoIfNeeded {
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"GPMigratedOscAutoV21"]) {
+        return;
+    }
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GPMigratedOscAutoV21"];
+
+    DataManager *dataMan = [[DataManager alloc] init];
+    TemporarySettings *current = [dataMan getSettings];
+    if (current == nil || [current.onscreenControls intValue] != 2) {
+        return;
+    }
+    [dataMan saveSettingsWithBitrate:[current.bitrate intValue]
+                           framerate:[current.framerate intValue]
+                              height:[current.height intValue]
+                               width:[current.width intValue]
+                         audioConfig:[current.audioConfig intValue]
+                    onscreenControls:1 // OnScreenControlsLevelAuto
+                       optimizeGames:current.optimizeGames
+                     multiController:current.multiController
+                     swapABXYButtons:current.swapABXYButtons
+                           audioOnPC:current.playAudioOnPC
+                      preferredCodec:(uint32_t)current.preferredCodec
+                      useFramePacing:current.useFramePacing
+                           enableHdr:current.enableHdr
+                      btMouseSupport:current.btMouseSupport
+                   absoluteTouchMode:current.absoluteTouchMode
+                        statsOverlay:current.statsOverlay];
 }
 
 #pragma mark - App lifecycle (upstream: beginForegroundRefresh / handleEnterBackground)
