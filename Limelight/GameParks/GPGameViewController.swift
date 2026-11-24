@@ -215,7 +215,7 @@ final class GPGameViewController: GPBaseViewController {
         })
         sheet.addAction(UIAlertAction(title: "Quit and start \(app.name ?? "this game")", style: .destructive) { [weak self] _ in
             guard let self = self else { return }
-            GPSessionController.shared().quitApp(running, onHost: self.host) { success in
+            GPSessionController.shared().quitApp(running, on: self.host) { success in
                 if success {
                     self.pushConnecting(app: self.app)
                 } else {
