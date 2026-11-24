@@ -71,10 +71,18 @@ static const int MAX_REQUEST_COUNT = 4;
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
     NSString *filePath = [paths objectAtIndex:0];
 
-    // GP v2.5 (cache invalidation, A-05): the "v25" component orphans
-    // every file cached by v2.4 and earlier in one place — retriever,
-    // manager and the Swift catalog all resolve paths through here.
-    filePath = [filePath stringByAppendingPathComponent:@"v25"];
+    // GP v2.5 (cache invalidation, A-05): the version component
+    // orphans every file cached by earlier versions in one place —
+    // retriever, manager and the Swift catalog all resolve paths
+    // through here. GP v2.9 (E-04): bumped "v25" -> "v29" — v2.8's
+    // D-04 display change blesses any file that draws without
+    // error, including blank-raster CORRUPT files written by
+    // v2.7 and earlier whose raster decodes to nothing; orphaning
+    // the pre-v2.9 cache once makes every cover re-fetch cleanly
+    // under the v2.8+ retriever rules (which reject all-zero
+    // rasters before writing). One-time cost: each cover is
+    // re-downloaded once on first v2.9 use.
+    filePath = [filePath stringByAppendingPathComponent:@"v29"];
 
     // Keep app assets separate by host UUID (A-67: the explicit host).
     filePath = [filePath stringByAppendingPathComponent:host.uuid ?: @""];
@@ -97,7 +105,7 @@ static const int MAX_REQUEST_COUNT = 4;
 + (NSString*) boxArtDirectoryForHostKey:(NSString*)hostKey {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
     NSString *dirPath = [paths objectAtIndex:0];
-    dirPath = [dirPath stringByAppendingPathComponent:@"v25"];
+    dirPath = [dirPath stringByAppendingPathComponent:@"v29"];
     dirPath = [dirPath stringByAppendingPathComponent:hostKey];
     return dirPath;
 }
@@ -382,6 +390,26 @@ static NSString * const GPBoxArtSignatureDefaultsKey = @"GPBoxArtListSignaturesV
                 @synchronized (noArt) {
                     noArt[key] = [NSDate date];
                 }
+            }
+            // GP v2.9 (E-01): a stale-write delete (D-01) can land
+            // after a fresh retriever's write to the same path and
+            // remove the FRESH art; the retriever reports failure
+            // and the session's callback discards failures, so
+            // without this the cover stayed missing until an
+            // unrelated retrieve trigger. Re-queue the host's
+            // retrieval pass from here — the mechanism itself, on
+            // the main queue like every other retrieve call site.
+            // The pass is idempotent: covers whose files exist are
+            // skipped, the just-cleared key above lets the affected
+            // app re-queue, and a fresh retriever is stamped with
+            // the current epoch, so it can only go stale on a NEW
+            // signature change — the re-queue cannot loop.
+            if (![finished isCancelled]
+                && finished.retrievalOutcome == AppAssetRetrievalOutcomeStaleWriteDeleted) {
+                TemporaryHost *host = finished.host;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [manager retrieveAssetsFromHost:host];
+                });
             }
         };
 

@@ -74,13 +74,16 @@ static const int MAX_ATTEMPTS = 5;
             // render means the body does not decode and must not be
             // written.
             // GP v2.8 (D-02): the render is capped like the display
-            // side (GPCatalog's B-11 cap, ~10 MP): a probe whose
-            // pixel count exceeds the cap — or whose dimensions are
-            // zero/negative — is rejected BEFORE any bitmap is
-            // allocated, so a hostile or corrupt header cannot force
-            // a huge allocation. The rejection is a transient
-            // OtherFailure, never DefinitiveNoArt: the host may well
-            // have art, just art this side will not render.
+            // side (GPCatalog's B-11 cap, ~10 MP), so a hostile or
+            // corrupt header cannot force a huge allocation.
+            // GP v2.9 (E-02): the cap is applied by SCALING the
+            // render (below), not by rejecting the probe — v2.8
+            // rejected over-cap probes outright, but the display
+            // side downscales and shows the same art, so a large
+            // valid cover was refused here and re-downloaded on
+            // every trigger forever. Only zero/negative dimensions
+            // are still rejected (nothing can be drawn at all), as
+            // a transient OtherFailure, never DefinitiveNoArt.
             // GP v2.8 (D-03): the probe draws into a raw CGContext
             // over a zero-filled buffer (premultipliedLast, mirroring
             // the display side) and scans the bytes afterwards:
@@ -98,11 +101,23 @@ static const int MAX_ATTEMPTS = 5;
             BOOL probeRejected = NO;
             if (probe != nil) {
                 double pixelCount = (double)probe.size.width * (double)probe.size.height;
-                if (probe.size.width <= 0 || probe.size.height <= 0 || pixelCount > 10000000) {
+                if (probe.size.width <= 0 || probe.size.height <= 0) {
                     probeRejected = YES;
                 } else {
-                    NSUInteger probeWidth = (NSUInteger)llround(probe.size.width);
-                    NSUInteger probeHeight = (NSUInteger)llround(probe.size.height);
+                    // GP v2.9 (E-02): draw at the B-11-capped size —
+                    // the same scaling GPCatalog's display side
+                    // applies — so the context allocation stays
+                    // bounded by the cap (D-02) while a large valid
+                    // cover still proves decodable and is written
+                    // below at its original size.
+                    double drawScale = 1.0;
+                    if (pixelCount > 10000000) {
+                        drawScale = sqrt(10000000.0 / pixelCount);
+                    }
+                    NSUInteger probeWidth = (NSUInteger)llround(probe.size.width * drawScale);
+                    NSUInteger probeHeight = (NSUInteger)llround(probe.size.height * drawScale);
+                    if (probeWidth == 0) { probeWidth = 1; }
+                    if (probeHeight == 0) { probeHeight = 1; }
                     CGImageRef cgImage = probe.CGImage;
                     if (cgImage != NULL && probeWidth > 0 && probeHeight > 0) {
                         size_t bytesPerRow = probeWidth * 4;
@@ -142,7 +157,10 @@ static const int MAX_ATTEMPTS = 5;
                 // above — the manager bumped the host's art epoch
                 // when the signature changed, so a moved epoch
                 // skips the write (the manager has already queued
-                // a fresh retriever for the current art).
+                // a fresh retriever for the current art). GP v2.9
+                // (E-01): the stale-delete case below reports its
+                // own outcome, so the manager re-queues a pass even
+                // when the delete removed a fresh retriever's file.
                 if (self.artEpochStillCurrentBlock != nil && !self.artEpochStillCurrentBlock()) {
                     break;
                 }
@@ -160,16 +178,31 @@ static const int MAX_ATTEMPTS = 5;
                 // both immediately AFTER a successful write and, if
                 // stale or cancelled, delete the just-written file
                 // and report the write as failed: success = NO makes
-                // the callback report failure, and OtherFailure
-                // below can neither stamp the no-art memory (only
-                // DefinitiveNoArt may) nor be read as a genuine
-                // fetch success (only WroteFile is).
+                // the callback report failure, and the failure
+                // outcome below can neither stamp the no-art memory
+                // (only DefinitiveNoArt may) nor be read as a
+                // genuine fetch success (only WroteFile is).
+                BOOL staleWriteDeleted = NO;
                 if (success && ([self isCancelled] || (self.artEpochStillCurrentBlock != nil && !self.artEpochStillCurrentBlock()))) {
                     [[NSFileManager defaultManager] removeItemAtPath:boxArtPath error:nil];
                     success = NO;
+                    staleWriteDeleted = YES;
                 }
                 if (success) {
                     outcome = AppAssetRetrievalOutcomeWroteFile;
+                } else if (staleWriteDeleted) {
+                    // GP v2.9 (E-01): the delete above removes
+                    // whatever is at the path NOW — if a fresh
+                    // retriever's write landed between this write
+                    // and the delete, the FRESH art is gone, and a
+                    // plain failure report re-queues nothing (the
+                    // session's callback discards failures). Report
+                    // the distinct stale-delete outcome instead, so
+                    // the manager re-queues the host's retrieval
+                    // pass itself: every ordering then ends with
+                    // current art present or actively being fetched,
+                    // with no dependence on an unrelated trigger.
+                    outcome = AppAssetRetrievalOutcomeStaleWriteDeleted;
                 } else {
                     // A write failure is a transient failure, never
                     // proof of no art — clear any definitive outcome

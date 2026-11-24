@@ -209,6 +209,15 @@ final class GPLibraryViewController: GPBaseViewController {
     private struct InitialismForm {
         let letters: String
         let numeral: Int?
+        /// GP v2.9 (E-10): set on query forms whose numeral was
+        /// parsed out of a spaceless roman suffix — that parse
+        /// also fires on ordinary word endings ("taxi", "max",
+        /// "six"), so such a form may only match a name form
+        /// whose letters EQUAL it, never one it merely prefixes.
+        /// Forms from the token-aware and digit parses (a numeral
+        /// the user actually typed, or a token of its own) keep
+        /// the prefix behaviour.
+        var requiresExactLetters: Bool = false
     }
 
     /// The normalised numeral value of a token that is wholly a
@@ -281,7 +290,10 @@ final class GPLibraryViewController: GPBaseViewController {
         for nameForm in nameForms {
             for queryForm in queryForms {
                 if let queryNumeral = queryForm.numeral {
-                    if nameForm.numeral == queryNumeral && nameForm.letters.hasPrefix(queryForm.letters) {
+                    let lettersMatch = queryForm.requiresExactLetters
+                        ? nameForm.letters == queryForm.letters
+                        : nameForm.letters.hasPrefix(queryForm.letters)
+                    if nameForm.numeral == queryNumeral && lettersMatch {
                         return true
                     }
                 } else {
@@ -308,7 +320,9 @@ final class GPLibraryViewController: GPBaseViewController {
     /// still yields its (letters, fullArabicValue) form — the
     /// plain first-character initialism is never emitted for a
     /// trailing-numeral name, so "Call of Duty 25" cannot
-    /// collapse to "cod2".
+    /// collapse to "cod2". GP v2.9 (E-09): a numeral in a
+    /// non-trailing position (an edition/subtitle suffix follows
+    /// it) also yields its numeral forms — see below.
     private static func initialismForms(nameTokens: [String], rawNameTokens: [String]) -> [InitialismForm] {
         if nameTokens.count >= 2, let last = nameTokens.last, let numeral = numeralValue(of: last) {
             let body = Array(nameTokens.dropLast())
@@ -317,9 +331,33 @@ final class GPLibraryViewController: GPBaseViewController {
                                    includeSingleInitial: true, includeTrailingAbbreviation: true)
                 .map { InitialismForm(letters: $0, numeral: numeral) }
         }
-        return lettersVariants(bodyTokens: nameTokens, rawBodyTokens: rawNameTokens,
-                               includeSingleInitial: true)
+        var forms = lettersVariants(bodyTokens: nameTokens, rawBodyTokens: rawNameTokens,
+                                    includeSingleInitial: true)
             .map { InitialismForm(letters: $0, numeral: nil) }
+        // GP v2.9 (E-09): the trailing branch above keys the
+        // numeral forms off the LAST token only, so a title whose
+        // numeral is followed by an edition or subtitle —
+        // "Grand Theft Auto V (GOTY)", "The Witcher 3: Wild
+        // Hunt", "Halo 5: Guardians" — lost them entirely and
+        // "gta 5" / "tw3" / "h5" stopped matching (they matched
+        // in v2.7). For each numeral token in a non-trailing
+        // position, emit the (letters of the tokens before it,
+        // that numeral) forms alongside the numeral-less forms.
+        // The numeral still has to match exactly (D-24), so no
+        // cross-sequel match opens: "gta 5" against
+        // "Grand Theft Auto VI (GOTY)" still fails on 5 ≠ 6.
+        for index in nameTokens.indices where index >= 1 && index < nameTokens.count - 1 {
+            guard let numeral = numeralValue(of: nameTokens[index]) else { continue }
+            let body = Array(nameTokens[..<index])
+            let rawBody = rawNameTokens.count == nameTokens.count ? Array(rawNameTokens[..<index]) : []
+            for letters in lettersVariants(bodyTokens: body, rawBodyTokens: rawBody,
+                                           includeSingleInitial: true, includeTrailingAbbreviation: true) {
+                if !forms.contains(where: { $0.letters == letters && $0.numeral == numeral }) {
+                    forms.append(InitialismForm(letters: letters, numeral: numeral))
+                }
+            }
+        }
+        return forms
     }
 
     /// The query's initialism forms, built like the name's:
@@ -331,11 +369,19 @@ final class GPLibraryViewController: GPBaseViewController {
     private static func spacelessQueryForms(queryTokens: [String], rawQueryTokens: [String],
                                             spacelessQuery: String) -> [InitialismForm] {
         var forms: [InitialismForm] = []
-        func add(letters: String, numeral: Int?) {
+        func add(letters: String, numeral: Int?, exact: Bool = false) {
             guard !letters.isEmpty else { return }
-            if !forms.contains(where: { $0.letters == letters && $0.numeral == numeral }) {
-                forms.append(InitialismForm(letters: letters, numeral: numeral))
+            if let existing = forms.firstIndex(where: { $0.letters == letters && $0.numeral == numeral }) {
+                // GP v2.9 (E-10): a non-exact twin — from the
+                // token-aware or digit parse, which run before the
+                // roman-suffix parse — is the wider form and wins;
+                // an exact form never widens an exact twin.
+                if forms[existing].requiresExactLetters && !exact {
+                    forms[existing].requiresExactLetters = false
+                }
+                return
             }
+            forms.append(InitialismForm(letters: letters, numeral: numeral, requiresExactLetters: exact))
         }
         var spacelessCarriesNumeral = false
         // Token-aware: "gta 5" / "gta v" — the numeral is its own
@@ -371,7 +417,14 @@ final class GPLibraryViewController: GPBaseViewController {
                 for length in stride(from: maxSuffix, through: 1, by: -1) {
                     let suffix = String(spacelessQuery.suffix(length))
                     if let numeral = numeralValue(of: suffix) {
-                        add(letters: String(spacelessQuery.dropLast(length)), numeral: numeral)
+                        // GP v2.9 (E-10): this parse invents a
+                        // numeral from any word ending that spells
+                        // one ("taxi" → 11, "max" → 10, "six" → 9),
+                        // so the form it adds is exact-letters: it
+                        // may only match a name form whose letters
+                        // equal the leftover, never a longer form
+                        // it merely prefixes ("ta" ✗ "Tap Titans").
+                        add(letters: String(spacelessQuery.dropLast(length)), numeral: numeral, exact: true)
                         spacelessCarriesNumeral = true
                         break
                     }

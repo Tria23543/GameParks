@@ -19,6 +19,16 @@ typedef NS_ENUM(NSInteger, AppAssetRetrievalOutcome) {
     AppAssetRetrievalOutcomeOtherFailure = 0,
     AppAssetRetrievalOutcomeWroteFile,
     AppAssetRetrievalOutcomeDefinitiveNoArt,
+    // GP v2.9 (E-01): the write landed but the post-write epoch
+    // re-check found it stale, so the retriever deleted the file
+    // again (D-01). The deletion can land after a fresh retriever's
+    // write to the same path and remove the FRESH art; nothing in
+    // the failure path re-queues it (the session's callback
+    // discards failures). This outcome tells the manager to
+    // re-queue the host's retrieval pass itself, so the affected
+    // cover is actively re-fetched instead of waiting for an
+    // unrelated trigger.
+    AppAssetRetrievalOutcomeStaleWriteDeleted,
 };
 
 @interface AppAssetRetriever : NSOperation

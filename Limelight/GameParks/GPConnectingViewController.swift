@@ -27,6 +27,20 @@ func gpKnownAddresses(of host: TemporaryHost) -> Set<String> {
     return Set([host.localAddress, host.activeAddress].compactMap { $0 }.filter { !$0.isEmpty })
 }
 
+/// GP v2.9 (E-06/E-07): a MAC address reduced to its lowercase
+/// hex digits, so the same address spelled with different case
+/// or separators ("AA:BB:…", "aa-bb-…", "AABB…") compares equal.
+/// Nil for an absent address and for an all-zero one: the
+/// placeholder "00:00:00:00:00:00" carries no identity and must
+/// never count as tie-break evidence (both stream screens
+/// already treat it as "no usable MAC").
+func gpNormalisedMAC(_ mac: String?) -> String? {
+    guard let mac = mac else { return nil }
+    let digits = mac.lowercased().filter { $0.isHexDigit }
+    if digits.isEmpty || digits.allSatisfy({ $0 == "0" }) { return nil }
+    return digits
+}
+
 /// D-17: the shared C-23 re-resolution used by the Connecting,
 /// Game and Host screens. A UUID match comes first (unchanged);
 /// otherwise the name matches are collected — exactly one is the
@@ -36,6 +50,11 @@ func gpKnownAddresses(of host: TemporaryHost) -> Set<String> {
 /// one, else overlap of the known (local/active) addresses.
 /// Exactly one survivor substitutes; zero or several survivors
 /// is no substitution at all (nil), never a first-in-list guess.
+/// GP v2.9 (E-06/E-07): the MAC comparison runs on normalised
+/// addresses (gpNormalisedMAC) — v2.8 compared the raw strings,
+/// so a case or separator difference defeated a genuine match;
+/// a placeholder/all-zero MAC now counts as no MAC on either
+/// side and the candidate falls through to the address test.
 func gpResolveHost(in hosts: [TemporaryHost], uuid: String, name: String,
                    mac: String?, addresses: Set<String>) -> TemporaryHost? {
     if !uuid.isEmpty, let byUUID = hosts.first(where: { $0.uuid == uuid }) {
@@ -47,8 +66,8 @@ func gpResolveHost(in hosts: [TemporaryHost], uuid: String, name: String,
     }
     guard nameMatches.count > 1 else { return nil }
     let survivors = nameMatches.filter { candidate in
-        if let capturedMAC = mac, !capturedMAC.isEmpty,
-           let candidateMAC = candidate.mac, !candidateMAC.isEmpty {
+        if let capturedMAC = gpNormalisedMAC(mac),
+           let candidateMAC = gpNormalisedMAC(candidate.mac) {
             return candidateMAC == capturedMAC
         }
         return !gpKnownAddresses(of: candidate).isDisjoint(with: addresses)
