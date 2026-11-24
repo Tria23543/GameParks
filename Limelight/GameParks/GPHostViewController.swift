@@ -86,6 +86,11 @@ final class GPHostViewController: GPBaseViewController {
         if let current = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
             ?? (hostUUID.isEmpty ? hosts.first(where: { $0.name == hostName }) : nil) {
             host = current
+            // B-09: a successful re-resolution clears the
+            // unavailable latch — if the PC came back, the page
+            // must not keep showing "no longer available" for the
+            // rest of its life.
+            hostUnavailable = false
         } else if !hostUnavailable {
             // A-24: the host is gone. Pop if this page is topmost;
             // otherwise show a not-available state (rebuildContent).
@@ -185,13 +190,21 @@ final class GPHostViewController: GPBaseViewController {
         let connectionRow = GPRow(showsChevron: false)
         connectionRow.titleLabel.text = "Connection"
         // A-48: claim "same network" only when the address in use is
-        // the host's local address; otherwise stay neutral.
+        // the host's local address; otherwise stay neutral. The
+        // no-address fall-through is state-aware (v2.6, completing
+        // A-48): it used to print "Online · Sunshine ready" even
+        // for an offline host, directly under an Offline status
+        // card.
         if let active = host.activeAddress, let local = host.localAddress, active == local {
             connectionRow.subtitle = "Home Wi-Fi · same network"
         } else if host.activeAddress != nil {
             connectionRow.subtitle = "Remote connection"
-        } else {
+        } else if host.state == .online {
             connectionRow.subtitle = "Online · Sunshine ready"
+        } else if host.state == .offline {
+            connectionRow.subtitle = "Offline"
+        } else {
+            connectionRow.subtitle = "Checking this PC"
         }
         connectionRow.valueLabel.text = session.lastPingMs(for: host) >= 0
             ? "\(session.lastPingMs(for: host)) ms" : "—"
@@ -206,8 +219,12 @@ final class GPHostViewController: GPBaseViewController {
 
         let apps = GPCatalog.sortedApps(for: host)
         let gamesRow = GPRow()
-        gamesRow.titleLabel.text = "Games on this host"
-        gamesRow.valueLabel.text = "\(apps.count)"
+        // B-40: this row links to the Library — retitle it so the
+        // page doesn't carry two "Games on this host" headings
+        // (the games section below keeps that title), and count
+        // the way Library counts: games only, not Desktop.
+        gamesRow.titleLabel.text = "View in Library"
+        gamesRow.valueLabel.text = "\(apps.filter { !GPCatalog.isDesktop($0) }.count)"
         gamesRow.addTarget(self, action: #selector(gamesRowTapped), for: .touchUpInside)
         dynamicStack.addArrangedSubview(gamesRow)
 

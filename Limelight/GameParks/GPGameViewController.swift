@@ -16,7 +16,11 @@ final class GPGameViewController: GPBaseViewController {
 
     private let hostUUID: String
     private let appID: String
-    private let appName: String
+    /// B-08: not a `let` — a successful id match refreshes the
+    /// stored name, so the name fallback below compares against
+    /// the game's CURRENT name, not the one it had when this page
+    /// was opened.
+    private var appName: String
     private let hostName: String
     private var host: TemporaryHost
     private var app: TemporaryApp
@@ -77,6 +81,21 @@ final class GPGameViewController: GPBaseViewController {
         return idMatches(candidate)
     }
 
+    /// B-08: the name fallback compares normalised forms — case-
+    /// and diacritic-folded, whitespace-collapsed — so a cosmetic
+    /// rename in Sunshine doesn't defeat it the way exact equality
+    /// against the originally stored name did.
+    private static func normalisedName(_ name: String?) -> String {
+        let folded = (name ?? "").folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+        return folded.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    private func nameMatches(_ candidate: TemporaryApp) -> Bool {
+        let stored = Self.normalisedName(appName)
+        guard !stored.isEmpty else { return false }
+        return Self.normalisedName(candidate.name) == stored
+    }
+
     @objc private func stateChanged() {
         let hosts = GPSessionController.shared().hosts
         // A-77: nil/empty UUID falls back to a name match.
@@ -95,34 +114,42 @@ final class GPGameViewController: GPBaseViewController {
         }
         if let currentApp = apps.first(where: { idMatches($0) }) {
             app = currentApp
+            // B-08: keep the stored name current, so the fallback
+            // below doesn't decay as the game is renamed over time.
+            if let freshName = currentApp.name, !freshName.isEmpty {
+                appName = freshName
+            }
         } else if !appID.isEmpty {
             // A-77: id matching failed — fall back to the name-based
-            // identity the appKey uses (host UUID + name).
-            if let byName = apps.first(where: { ($0.name ?? "") == appName }) {
+            // identity the appKey uses (host UUID + name). B-08:
+            // the comparison is normalised, not exact.
+            if let byName = apps.first(where: { nameMatches($0) }) {
                 app = byName
             } else {
                 markUnavailable()
                 return
             }
-        } else if let byName = apps.first(where: { ($0.name ?? "") == appName }) {
+        } else if let byName = apps.first(where: { nameMatches($0) }) {
             app = byName
         } else {
             markUnavailable()
             return
         }
+        // B-09: a successful re-resolution clears the unavailable
+        // latch — the game came back, so the page must not keep
+        // showing "no longer available" for the rest of its life.
+        appUnavailable = false
         requestContentRebuild()
     }
 
-    /// A-24: the game (or its host) is gone — pop if topmost, else
-    /// show a not-available state.
+    /// A-24: the game (or its host) is gone — show the
+    /// not-available state. B-08: in ALL cases, topmost included —
+    /// the page never pops silently; the message view explains
+    /// what happened and carries the Back affordance.
     private func markUnavailable() {
         if appUnavailable { requestContentRebuild(); return }
         appUnavailable = true
-        if navigationController?.topViewController === self {
-            navigationController?.popViewController(animated: true)
-        } else {
-            requestContentRebuild()
-        }
+        requestContentRebuild()
     }
 
     // MARK: - Rendering
@@ -197,7 +224,7 @@ final class GPGameViewController: GPBaseViewController {
         } else {
             let running = session.runningApp(for: host)
             let playButton = gpPrimaryButton(isThisApp(running) ? "Resume on \(host.name ?? "your PC")" : "Play on \(host.name ?? "your PC")")
-            playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
+            playButton.addTarget(self, action: #selector(playTapped(_:)), for: .touchUpInside)
             dynamicStack.addArrangedSubview(playButton)
             if let running = running, !isThisApp(running) {
                 dynamicStack.addArrangedSubview(gpLabel("\(running.name ?? "Another game") is currently running on this PC — you'll get the choice to resume it or switch.",
@@ -205,13 +232,12 @@ final class GPGameViewController: GPBaseViewController {
             }
         }
 
-        // Stats row
-        let streamSummary: String
-        if let settings = DataManager().getSettings() {
-            streamSummary = "\(settings.height?.intValue ?? 1080)p\(settings.framerate?.intValue ?? 60)"
-        } else {
-            streamSummary = "1080p60"
-        }
+        // Stats row. B-41: the height goes through the same label
+        // mapping Stream settings uses — 2160 is "4K", not "2160p".
+        let currentSettings = DataManager().getSettings()
+        let settingsHeight = currentSettings?.height?.intValue ?? 1080
+        let settingsFps = currentSettings?.framerate?.intValue ?? 60
+        let streamSummary = "\(settingsHeight == 2160 ? "4K" : "\(settingsHeight)p")\(settingsFps)"
         let statsRow = UIStackView(arrangedSubviews: [
             statTile(title: "Played", value: gpFormatPlaytime(GPStats.shared.seconds(forAppKey: key))),
             statTile(title: "Last played", value: gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key))),
@@ -278,7 +304,7 @@ final class GPGameViewController: GPBaseViewController {
 
     // MARK: - Actions
 
-    @objc private func playTapped() {
+    @objc private func playTapped(_ sender: UIButton) {
         let session = GPSessionController.shared()
         guard let running = session.runningApp(for: host) else {
             pushConnecting(app: app)
@@ -307,6 +333,11 @@ final class GPGameViewController: GPBaseViewController {
             }
         })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        // B-04: on iPad an action sheet MUST have a popover anchor
+        // — presenting one without it raises and terminates the
+        // app. Anchor it to the Play button that summoned it.
+        sheet.popoverPresentationController?.sourceView = sender
+        sheet.popoverPresentationController?.sourceRect = sender.bounds
         present(sheet, animated: true)
     }
 
