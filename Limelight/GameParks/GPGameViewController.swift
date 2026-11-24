@@ -111,7 +111,7 @@ final class GPGameViewController: GPBaseViewController {
         stack.addArrangedSubview(padded(launchOptions, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
 
         if engine.runningApp(for: host)?.id == app.id {
-            let runningNote = GPLabel("Running now on \(host.name ?? "your PC") — Play resumes it.", font: GPTheme.body(13, weight: .bold), color: GPTheme.live, lines: 2)
+            let runningNote = GPLabel("Running now on \(host.name) — Play resumes it.", font: GPTheme.body(13, weight: .bold), color: GPTheme.live, lines: 2)
             stack.addArrangedSubview(padded(runningNote, insets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)))
         }
 
@@ -168,7 +168,7 @@ final class GPGameViewController: GPBaseViewController {
         let engine = GPEngine.shared
         if host.pairState != .paired {
             engine.activateHost(host, userInitiated: true)
-            showMessage(title: "Pairing", message: "Pair with \(host.name ?? "your PC") first — one PIN, entered once — then press Play again.")
+            showMessage(title: "Pairing", message: "Pair with \(host.name) first — one PIN, entered once — then press Play again.")
             return
         }
         let connecting = GPConnectingViewController(app: app)

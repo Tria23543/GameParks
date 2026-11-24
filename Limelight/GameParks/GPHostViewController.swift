@@ -195,7 +195,7 @@ final class GPHostViewController: GPBaseViewController {
         if host.pairState == .paired {
             GPEngine.shared.refreshAppList(host)
         }
-        showMessage(title: "Reconnected", message: "GameParks re-checked \(host.name ?? "your PC") and refreshed its game list. If a stream still misbehaves, restart Sunshine on the PC itself.")
+        showMessage(title: "Reconnected", message: "GameParks re-checked \(host.name) and refreshed its game list. If a stream still misbehaves, restart Sunshine on the PC itself.")
     }
 
     @objc private func addGameTapped() {
@@ -213,7 +213,7 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func removeTapped() {
-        let alert = UIAlertController(title: "Remove \(host.name ?? "this PC")?",
+        let alert = UIAlertController(title: "Remove \(host.name)?",
                                       message: "GameParks will forget this PC on this phone. You can pair again any time.",
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))

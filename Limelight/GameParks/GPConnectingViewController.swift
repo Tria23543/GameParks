@@ -127,7 +127,7 @@ final class GPConnectingViewController: GPBaseViewController {
                     self.markStep(0)
                     self.startGameSteps()
                 } else {
-                    self.fail(message: "\(host.name ?? "Your PC") did not wake up. Check it is plugged in and Wake-on-LAN is on, then try again.")
+                    self.fail(message: "\(host.name) did not wake up. Check it is plugged in and Wake-on-LAN is on, then try again.")
                 }
             }
         } else {
@@ -160,7 +160,7 @@ final class GPConnectingViewController: GPBaseViewController {
         // Another game already running on the host? Ask before quitting it.
         if let running = engine.runningApp(for: host), running.id != app.id {
             let alert = UIAlertController(title: running.name,
-                                          message: "\(running.name ?? "Another game") is currently running on \(host.name ?? "your PC").",
+                                          message: "\(running.name ?? "Another game") is currently running on \(host.name).",
                                           preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
                 self.navigationController?.popViewController(animated: true)
