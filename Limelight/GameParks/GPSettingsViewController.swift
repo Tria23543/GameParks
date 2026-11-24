@@ -321,7 +321,7 @@ final class GPStreamSettingsViewController: GPBaseViewController {
         let bitrateValue = gpLabel("\(Int((Double(cur?.bitrate?.intValue ?? 20000) / 1000.0).rounded())) Mb/s",
                                    font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 1)
         bitrateValue.tag = 77
-        let stepper = UIStepper()
+        let stepper = GPGuardedStepper()
         stepper.minimumValue = 5
         stepper.maximumValue = 40
         stepper.stepValue = 1
@@ -456,7 +456,7 @@ func gpFormatBitrate(_ kbps: Int) -> String {
     return String(format: "%.1f Mb/s", mbps)
 }
 
-func gpSegmented(items: [String]) -> UISegmentedControl {    let segmented = UISegmentedControl(items: items)
+func gpSegmented(items: [String]) -> UISegmentedControl {    let segmented = GPGuardedSegmentedControl(items: items)
     segmented.selectedSegmentTintColor = GPColor.accent
     segmented.backgroundColor = GPColor.panelRaised
     segmented.setTitleTextAttributes([.foregroundColor: GPColor.textPrimary,

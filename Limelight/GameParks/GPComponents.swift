@@ -278,6 +278,58 @@ class GPGuardedControl: UIControl {
     }
 }
 
+/// The same scroll-safety for segmented controls (same overrides
+/// as GPGuardedControl — Swift gives the UIKit base classes no
+/// shared implementation point). A segmented control changes a
+/// setting, so a scroll gesture must never be able to move it.
+class GPGuardedSegmentedControl: UISegmentedControl {
+    private let scrollGuard = GPScrollGuard()
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.begin(for: self)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if scrollGuard.contentScrolled {
+            super.touchesCancelled(touches, with: event)
+        } else {
+            super.touchesEnded(touches, with: event)
+        }
+        scrollGuard.reset()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.reset()
+        super.touchesCancelled(touches, with: event)
+    }
+}
+
+/// The same scroll-safety for steppers: a resting or dragging
+/// finger on the stepper must not be able to change the value.
+class GPGuardedStepper: UIStepper {
+    private let scrollGuard = GPScrollGuard()
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.begin(for: self)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if scrollGuard.contentScrolled {
+            super.touchesCancelled(touches, with: event)
+        } else {
+            super.touchesEnded(touches, with: event)
+        }
+        scrollGuard.reset()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.reset()
+        super.touchesCancelled(touches, with: event)
+    }
+}
+
 /// The same scroll-safety for buttons (same overrides as
 /// GPGuardedControl — Swift gives the two UIKit base classes no
 /// shared implementation point).
