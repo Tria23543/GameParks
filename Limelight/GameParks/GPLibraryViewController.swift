@@ -106,9 +106,17 @@ final class GPLibraryViewController: GPBaseViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
-    /// A-23: folded substring match, plus a normalised-token match
-    /// so "pokemon" finds Pokémon, "spiderman" finds Spider-Man and
-    /// "gta" finds Grand Theft Auto titles.
+    /// A-23: folded substring match, plus normalised matching so
+    /// "pokemon" finds Pokémon, "spiderman" finds Spider-Man and
+    /// "gta" finds Grand Theft Auto titles. The v2.5 mechanisms
+    /// failed those last two headline cases, so v2.6 adds:
+    /// (a) a spaces-removed comparison — "spiderman" is contained
+    ///     in "spiderman" once "Spider-Man" is normalised and its
+    ///     spaces removed;
+    /// (b) initialism matching — the query, spaces removed, is a
+    ///     prefix of the name's token initials ("gta" → "gtav"
+    ///     from Grand Theft Auto V), or every query token is a
+    ///     prefix of a name token.
     private func appMatches(_ app: TemporaryApp, query rawQuery: String) -> Bool {
         let name = app.name ?? ""
         let foldedName = name.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
@@ -119,7 +127,36 @@ final class GPLibraryViewController: GPBaseViewController {
         if !normalizedQuery.isEmpty && normalizedName.contains(normalizedQuery) { return true }
         let nameTokens = normalizedName.split(separator: " ").map(String.init)
         let queryTokens = normalizedQuery.split(separator: " ").map(String.init)
-        return !queryTokens.isEmpty && queryTokens.allSatisfy { nameTokens.contains($0) }
+        if !queryTokens.isEmpty && queryTokens.allSatisfy { nameTokens.contains($0) } { return true }
+        // (a) spaces-removed comparison, both directions of containment
+        // on the name side: the spaceless query inside the spaceless name.
+        let spacelessName = nameTokens.joined()
+        let spacelessQuery = queryTokens.joined()
+        if !spacelessQuery.isEmpty && spacelessName.contains(spacelessQuery) { return true }
+        // (b) initialism: "gta" prefixes the initials of
+        // "grand theft auto v" ("gtav").
+        if spacelessQuery.count >= 2 {
+            let initials = nameTokens.compactMap { $0.first }.map(String.init).joined()
+            if initials.hasPrefix(spacelessQuery) { return true }
+        }
+        // (b′) every query token prefixes some name token.
+        return !queryTokens.isEmpty && queryTokens.allSatisfy { queryToken in
+            nameTokens.contains { $0.hasPrefix(queryToken) }
+        }
+    }
+
+    /// B-13: entry point for Home's "See all" posters — each rail
+    /// selects its matching filter here instead of landing on
+    /// whatever filter Library was last left on.
+    func showFilter(named name: String) {
+        switch name {
+        case "big": filter = .big
+        case "classics": filter = .classics
+        case "favourites": filter = .favourites
+        default: filter = .all
+        }
+        refreshChips()
+        requestContentRebuild()
     }
 
     private func filterTag(_ value: Filter) -> Int {
@@ -171,6 +208,10 @@ final class GPLibraryViewController: GPBaseViewController {
         let allApps = GPCatalog.sortedApps(for: host)
 
         if host.pairState != .paired {
+            // A-72: this branch returns before the count assignment
+            // below, so set the subtitle here — never leave a stale
+            // count from a previous render over this state.
+            subtitleLabel.text = nil
             let message = GPMessageView()
             message.configure(title: "Pair with your PC to see its games",
                               message: "Your library is read from Sunshine on the PC, and that needs the one-time pairing.",
@@ -181,6 +222,8 @@ final class GPLibraryViewController: GPBaseViewController {
         }
 
         if allApps.isEmpty {
+            // A-72: same early return — the empty list's true count.
+            subtitleLabel.text = "0 games"
             let message = GPMessageView()
             if let error = session.appListError(for: host) {
                 message.configure(title: "Couldn't load your games", message: error, actionTitle: "Try again")
@@ -263,12 +306,15 @@ final class GPLibraryViewController: GPBaseViewController {
     }
 
     @objc private func openHostPage() {
-        guard let host = GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first else { return }
+        // B-16: resolve against the rendering host (A-74), not the
+        // session's possibly since-changed selection.
+        guard let host = renderingHost ?? GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first else { return }
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
     }
 
     @objc private func retryAppList() {
-        guard let host = GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first else { return }
+        // B-16: rendering host first, as in openHostPage.
+        guard let host = renderingHost ?? GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first else { return }
         GPSessionController.shared().fetchAppList(for: host)
     }
 }

@@ -170,13 +170,13 @@ final class GPHomeViewController: GPBaseViewController {
         let bigGames = apps.filter { !GPCatalog.info(for: $0).isClassic && !GPCatalog.isDesktop($0) }
         if !bigGames.isEmpty {
             dynamicStack.addArrangedSubview(gpSectionHeader("Jump back in", subtitle: "Your big games"))
-            dynamicStack.addArrangedSubview(rail(for: host, apps: bigGames))
+            dynamicStack.addArrangedSubview(rail(for: host, apps: bigGames, seeAllFilter: "big"))
         }
 
         let classics = apps.filter { GPCatalog.info(for: $0).isClassic }
         if !classics.isEmpty {
             dynamicStack.addArrangedSubview(gpSectionHeader("Your classics", subtitle: "Your own copies"))
-            dynamicStack.addArrangedSubview(rail(for: host, apps: classics))
+            dynamicStack.addArrangedSubview(rail(for: host, apps: classics, seeAllFilter: "classics"))
         }
 
         if let desktop = apps.first(where: { GPCatalog.isDesktop($0) }) {
@@ -265,9 +265,16 @@ final class GPHomeViewController: GPBaseViewController {
         heroAppKey = key
         card.stack.addArrangedSubview(gpLabel(app.name, font: GPFont.display(20, weight: .extrabold), color: GPColor.textPrimary, lines: 2))
         let played = GPStats.shared.seconds(forAppKey: key)
+        // B-39: lowercase only the relative forms ("today",
+        // "yesterday", "2 days ago"); the absolute "12 Nov 2026"
+        // form keeps its capitalised month.
+        let lastPlayedRaw = gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key))
+        let lastPlayedDisplay = (lastPlayedRaw == "Today" || lastPlayedRaw == "Yesterday"
+                                 || lastPlayedRaw.hasSuffix("days ago"))
+            ? lastPlayedRaw.lowercased() : lastPlayedRaw
         let subtitle = played > 0
-            ? "\(gpFormatPlaytime(played)) played · Last played \(gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key)).lowercased())"
-            : "Last played \(gpFormatLastPlayed(GPStats.shared.lastPlayed(forAppKey: key)).lowercased())"
+            ? "\(gpFormatPlaytime(played)) played · Last played \(lastPlayedDisplay)"
+            : "Last played \(lastPlayedDisplay)"
         card.stack.addArrangedSubview(gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2))
 
         let playPill = gpLabel("  ▶  Play  ", font: GPFont.display(14, weight: .bold), color: GPColor.onAccent, lines: 1)
@@ -283,7 +290,7 @@ final class GPHomeViewController: GPBaseViewController {
         return card
     }
 
-    private func rail(for host: TemporaryHost, apps: [TemporaryApp]) -> UIView {
+    private func rail(for host: TemporaryHost, apps: [TemporaryApp], seeAllFilter: String) -> UIView {
         let scroll = GPScrollView()
         scroll.showsHorizontalScrollIndicator = false
         // Same delivery policy as the page scaffold: a gesture
@@ -316,12 +323,16 @@ final class GPHomeViewController: GPBaseViewController {
         }
 
         // A-81: a rail holds 10; anything beyond gets a route out.
+        // B-13: the poster carries its rail's filter name in its
+        // appKey slot (it is not an app; the handler reads only this),
+        // so "See all" opens Library on this rail's games.
         if apps.count > 10 {
             let seeAll = GPPosterView()
             seeAll.configure(name: "See all", subtitle: "In Library", cover: nil)
             seeAll.translatesAutoresizingMaskIntoConstraints = false
             seeAll.widthAnchor.constraint(equalToConstant: 118).isActive = true
-            seeAll.addTarget(self, action: #selector(seeAllTapped), for: .touchUpInside)
+            seeAll.appKey = seeAllFilter
+            seeAll.addTarget(self, action: #selector(seeAllTapped(_:)), for: .touchUpInside)
             row.addArrangedSubview(seeAll)
         }
 
@@ -340,7 +351,9 @@ final class GPHomeViewController: GPBaseViewController {
     // MARK: - Actions — navigation is always the first thing
 
     @objc private func hostCardTapped() {
-        guard let host = GPSessionController.shared().selectedHost
+        // B-16: open the host the card displays (the rendering
+        // host, A-74), not whatever is selected at tap time.
+        guard let host = renderingHost ?? GPSessionController.shared().selectedHost
                 ?? GPSessionController.shared().hosts.first else { return }
         GPSessionController.shared().selectHost(host)
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
@@ -373,8 +386,14 @@ final class GPHomeViewController: GPBaseViewController {
         navigationController?.pushViewController(GPGameViewController(host: host, app: app), animated: true)
     }
 
-    @objc private func seeAllTapped() {
-        // A-81: tab switch alone (the Library opens on its All filter).
+    @objc private func seeAllTapped(_ sender: GPPosterView) {
+        // B-13: select the tapped rail's filter in Library first,
+        // then switch tabs — Library no longer opens on whatever
+        // filter was last selected there.
+        if let controllers = tabBarController?.viewControllers, controllers.count > 1,
+           let library = controllers[1] as? GPLibraryViewController {
+            library.showFilter(named: sender.appKey ?? "all")
+        }
         tabBarController?.selectedIndex = 1
     }
 
