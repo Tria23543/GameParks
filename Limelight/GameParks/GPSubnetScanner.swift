@@ -132,7 +132,7 @@ import Foundation
                 semaphore.signal()
             }, shouldAddToDiscovery: { isCurrent() })
         }
-        guard semaphore.wait(timeout: .now() + validationTimeout) == .success else {
+        guard semaphore.wait(timeout: .now() + Self.validationTimeout) == .success else {
             return nil
         }
         return result
