@@ -401,7 +401,12 @@ extension GPEngine: DiscoveryCallback {
             } else {
                 self.selectedHost = discovered.first
             }
-            self.onHostsChanged?()
+            // Must go through notifyHostsChanged(): every GameParks screen
+            // observes the .gpHostsChanged notification, and onHostsChanged
+            // alone is not observed by any screen. Calling only the closure
+            // here (as this did before) updated the host list silently and
+            // discovered PCs never appeared on screen.
+            self.notifyHostsChanged()
             if let host = self.selectedHost, host.state == .online, host.pairState == .paired,
                host.appList.count == 0 {
                 self.refreshAppList(host)
