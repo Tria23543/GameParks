@@ -283,7 +283,10 @@ enum GPCatalog {
         // may be nil or point at a divergent instance while the
         // missing-art check (which already used the explicit host)
         // sees the file present and never re-triggers.
-        guard let uuid = host.uuid, let appID = app.id else { return nil }
+        // (host.uuid is a non-optional String in the bridging; the
+        // v2.6 optional chain came from app.host being optional.)
+        let uuid = host.uuid
+        guard let appID = app.id else { return nil }
         // The app name is part of the key (not just host UUID + app
         // id): if Sunshine renumbers its app ids, a renamed app must
         // not inherit the previous game's decoded cover.
