@@ -143,12 +143,21 @@ final class GPLibraryViewController: GPBaseViewController {
         // "cod 2" against "Call of Duty 2" — match too. The
         // discipline is unchanged: ≥2 characters, prefix-only,
         // no other path can match.
+        // D-24/D-25/D-26: each form is a (letters, numeral) pair
+        // with the numeral a normalised Int?, not a concatenated
+        // string — when both sides carry a numeral the numerals
+        // must match exactly, so "gta 5" no longer prefix-matches
+        // Grand Theft Auto VI and "cod 2" no longer matches
+        // Call of Duty 25; a numeral-less query keeps the prefix
+        // behaviour against the name's full form ("gta" still
+        // finds Grand Theft Auto V).
         if spacelessQuery.count >= 2 {
-            let initialsForms = Self.initialismForms(nameTokens: nameTokens)
-            let queryForms = Self.spacelessQueryForms(queryTokens: queryTokens, spacelessQuery: spacelessQuery)
-            if initialsForms.contains(where: { initials in
-                queryForms.contains(where: { initials.hasPrefix($0) })
-            }) { return true }
+            let nameForms = Self.initialismForms(nameTokens: nameTokens,
+                                                 rawNameTokens: Self.rawTokens(of: name))
+            let queryForms = Self.spacelessQueryForms(queryTokens: queryTokens,
+                                                      rawQueryTokens: Self.rawTokens(of: rawQuery),
+                                                      spacelessQuery: spacelessQuery)
+            if Self.initialismMatches(nameForms: nameForms, queryForms: queryForms) { return true }
         }
         // (b′) every query token prefixes some name token.
         return !queryTokens.isEmpty && queryTokens.allSatisfy { queryToken in
@@ -193,53 +202,167 @@ final class GPLibraryViewController: GPBaseViewController {
         return nil
     }
 
-    /// The name's initialism, with a trailing numeral token
-    /// carried in BOTH numeral forms: "grand theft auto v" →
-    /// ["gta5", "gtav"], "call of duty 2" → ["cod2", "codii"].
-    /// A name with no trailing numeral keeps its plain
-    /// initialism ("grand theft auto" → ["gta"]), exactly the
-    /// A-23 form.
-    private static func initialismForms(nameTokens: [String]) -> [String] {
-        let plain = nameTokens.compactMap { $0.first }.map(String.init).joined()
-        guard nameTokens.count >= 2, let last = nameTokens.last,
-              let arabic = arabicForm(of: last), let roman = romanForm(of: last) else {
-            return [plain]
-        }
-        let prefix = nameTokens.dropLast().compactMap { $0.first }.map(String.init).joined()
-        guard !prefix.isEmpty else { return [plain] }
-        return [prefix + arabic, prefix + roman]
+    /// D-24: one initialism form — a letters part plus the
+    /// trailing numeral as a normalised value (roman and arabic
+    /// spellings of the same number are the same Int), or nil
+    /// when the form carries no numeral.
+    private struct InitialismForm {
+        let letters: String
+        let numeral: Int?
     }
 
-    /// The query's spaceless form, plus the same form with its
-    /// trailing numeral swapped to the other numeral system:
-    /// "gta 5" (tokens) and "gta5" (one token) both yield
-    /// ["gta5", "gtav"]; "gtav" yields ["gtav", "gta5"]. The
-    /// original form is always included, so every A-23 match
-    /// through the plain initialism still matches.
-    private static func spacelessQueryForms(queryTokens: [String], spacelessQuery: String) -> [String] {
-        var forms = [spacelessQuery]
-        func addForms(base: String, numeralToken: String) {
-            guard !base.isEmpty else { return }
-            if let arabic = arabicForm(of: numeralToken) {
-                let form = base + arabic
-                if !forms.contains(form) { forms.append(form) }
-            }
-            if let roman = romanForm(of: numeralToken) {
-                let form = base + roman
-                if !forms.contains(form) { forms.append(form) }
+    /// The normalised numeral value of a token that is wholly a
+    /// numeral ("v" → 5, "07" → 7, "25" → 25), else nil. Built
+    /// on arabicForm, so its leading-zero normalisation and the
+    /// I–XX tables carry over; arabic values of any size parse.
+    private static func numeralValue(of token: String) -> Int? {
+        guard let arabic = arabicForm(of: token) else { return nil }
+        return Int(arabic)
+    }
+
+    /// The tokens of a string in its original case, split the
+    /// same way GPCatalog.normalized splits them, so index i
+    /// here is token i of the normalised form. Used only to spot
+    /// tokens that were abbreviations in the original spelling
+    /// (D-25(i)).
+    private static func rawTokens(of string: String) -> [String] {
+        string.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+    }
+
+    /// D-25(i): a token that is itself an abbreviation in the
+    /// original spelling — at least two characters, all letters,
+    /// and already fully uppercased ("GTA" in "GTA V").
+    private static func isAbbreviation(_ rawToken: String) -> Bool {
+        rawToken.count >= 2 && rawToken.allSatisfy({ $0.isLetter }) && rawToken == rawToken.uppercased()
+    }
+
+    /// The letters parts a token list can contribute to an
+    /// initialism form: the joined tokens, the token initials,
+    /// and — for each non-trailing token that is itself an
+    /// abbreviation (D-25(i)) — the initials with that whole
+    /// token kept ("GTA V" yields "gta" as well as "g").
+    /// `includeSingleInitial` keeps the one-letter initial of a
+    /// lone body token (the name side's A-23 form, "g" for
+    /// "GTA V"); the query side omits it, so a query's letters
+    /// are never shorter than one of its own tokens.
+    private static func lettersVariants(bodyTokens: [String], rawBodyTokens: [String],
+                                        includeSingleInitial: Bool,
+                                        includeTrailingAbbreviation: Bool = false) -> [String] {
+        var variants: [String] = []
+        func add(_ letters: String) {
+            if !letters.isEmpty && !variants.contains(letters) { variants.append(letters) }
+        }
+        add(bodyTokens.joined())
+        let initials = bodyTokens.compactMap { $0.first }.map(String.init)
+        if bodyTokens.count >= 2 || includeSingleInitial {
+            add(initials.joined())
+        }
+        // Abbreviation alternates: a non-trailing token may stand
+        // whole in place of its initial. In a numeral form the
+        // trailing token is the numeral, already dropped, so the
+        // caller passes includeTrailingAbbreviation and every
+        // body token is eligible there.
+        if rawBodyTokens.count == bodyTokens.count {
+            let eligible = includeTrailingAbbreviation ? bodyTokens.indices : bodyTokens.indices.dropLast()
+            for index in eligible where isAbbreviation(rawBodyTokens[index]) {
+                add(bodyTokens.enumerated().map { $0.offset == index ? $0.element : String($0.element.first ?? Character(" ")) }.joined())
             }
         }
+        return variants
+    }
+
+    /// D-24 matching: when the query form carries a numeral, the
+    /// name form must carry the same numeral exactly and its
+    /// letters must prefix-match; when it carries none, the
+    /// query letters prefix the name's full form (letters plus
+    /// its numeral in either system), preserving A-23's "gta"
+    /// → Grand Theft Auto V.
+    private static func initialismMatches(nameForms: [InitialismForm], queryForms: [InitialismForm]) -> Bool {
+        for nameForm in nameForms {
+            for queryForm in queryForms {
+                if let queryNumeral = queryForm.numeral {
+                    if nameForm.numeral == queryNumeral && nameForm.letters.hasPrefix(queryForm.letters) {
+                        return true
+                    }
+                } else {
+                    var fullForms = [nameForm.letters]
+                    if let numeral = nameForm.numeral {
+                        fullForms = [nameForm.letters + String(numeral)]
+                        if let roman = arabicToRoman[String(numeral)] {
+                            fullForms.append(nameForm.letters + roman)
+                        }
+                    }
+                    if fullForms.contains(where: { $0.hasPrefix(queryForm.letters) }) { return true }
+                }
+            }
+        }
+        return false
+    }
+
+    /// The name's initialism forms: "grand theft auto v" →
+    /// [("gta", 5), ("grandtheftauto", 5)], "call of duty 2" →
+    /// [("cod", 2), ("callofduty", 2)]. A name with no trailing
+    /// numeral keeps numeral-less forms ("grand theft auto" →
+    /// [("gta", nil), …]), exactly the A-23 shape. D-26: a
+    /// trailing numeral with no roman form (over 20, or 0)
+    /// still yields its (letters, fullArabicValue) form — the
+    /// plain first-character initialism is never emitted for a
+    /// trailing-numeral name, so "Call of Duty 25" cannot
+    /// collapse to "cod2".
+    private static func initialismForms(nameTokens: [String], rawNameTokens: [String]) -> [InitialismForm] {
+        if nameTokens.count >= 2, let last = nameTokens.last, let numeral = numeralValue(of: last) {
+            let body = Array(nameTokens.dropLast())
+            let rawBody = rawNameTokens.count == nameTokens.count ? Array(rawNameTokens.dropLast()) : []
+            return lettersVariants(bodyTokens: body, rawBodyTokens: rawBody,
+                                   includeSingleInitial: true, includeTrailingAbbreviation: true)
+                .map { InitialismForm(letters: $0, numeral: numeral) }
+        }
+        return lettersVariants(bodyTokens: nameTokens, rawBodyTokens: rawNameTokens,
+                               includeSingleInitial: true)
+            .map { InitialismForm(letters: $0, numeral: nil) }
+    }
+
+    /// The query's initialism forms, built like the name's:
+    /// "gta 5" (tokens) and "gta5" / "gtav" (one token) all
+    /// yield ("gta", 5); "gta" yields ("gta", nil). D-25(ii):
+    /// a multi-token query also yields its initials-based form,
+    /// so "grand theft auto 5" and "call of duty ii" reach the
+    /// same (letters, numeral) forms as their abbreviations.
+    private static func spacelessQueryForms(queryTokens: [String], rawQueryTokens: [String],
+                                            spacelessQuery: String) -> [InitialismForm] {
+        var forms: [InitialismForm] = []
+        func add(letters: String, numeral: Int?) {
+            guard !letters.isEmpty else { return }
+            if !forms.contains(where: { $0.letters == letters && $0.numeral == numeral }) {
+                forms.append(InitialismForm(letters: letters, numeral: numeral))
+            }
+        }
+        var spacelessCarriesNumeral = false
         // Token-aware: "gta 5" / "gta v" — the numeral is its own
         // query token.
-        if queryTokens.count >= 2, let last = queryTokens.last,
-           arabicForm(of: last) != nil || romanForm(of: last) != nil {
-            addForms(base: queryTokens.dropLast().joined(), numeralToken: last)
+        if queryTokens.count >= 2, let last = queryTokens.last, let numeral = numeralValue(of: last) {
+            let body = Array(queryTokens.dropLast())
+            let rawBody = rawQueryTokens.count == queryTokens.count ? Array(rawQueryTokens.dropLast()) : []
+            for letters in lettersVariants(bodyTokens: body, rawBodyTokens: rawBody,
+                                           includeSingleInitial: false, includeTrailingAbbreviation: true) {
+                add(letters: letters, numeral: numeral)
+            }
+            spacelessCarriesNumeral = true
+        } else if queryTokens.count >= 2 {
+            // Numeral-less multi-token query: the initials form
+            // alongside the joined spaceless form below.
+            for letters in lettersVariants(bodyTokens: queryTokens, rawBodyTokens: rawQueryTokens,
+                                           includeSingleInitial: false) where letters != spacelessQuery {
+                add(letters: letters, numeral: nil)
+            }
         }
         // Spaceless trailing arabic digits: "gta5", "cod2".
         let digitCount = spacelessQuery.reversed().prefix(while: { $0.isNumber }).count
         if digitCount > 0 && digitCount < spacelessQuery.count {
-            addForms(base: String(spacelessQuery.dropLast(digitCount)),
-                     numeralToken: String(spacelessQuery.suffix(digitCount)))
+            if let numeral = numeralValue(of: String(spacelessQuery.suffix(digitCount))) {
+                add(letters: String(spacelessQuery.dropLast(digitCount)), numeral: numeral)
+                spacelessCarriesNumeral = true
+            }
         } else if digitCount == 0 {
             // Spaceless trailing roman numeral: "gtav", "codii" —
             // the longest roman suffix that is a whole numeral.
@@ -247,12 +370,19 @@ final class GPLibraryViewController: GPBaseViewController {
             if maxSuffix >= 1 {
                 for length in stride(from: maxSuffix, through: 1, by: -1) {
                     let suffix = String(spacelessQuery.suffix(length))
-                    if romanToArabic[suffix] != nil {
-                        addForms(base: String(spacelessQuery.dropLast(length)), numeralToken: suffix)
+                    if let numeral = numeralValue(of: suffix) {
+                        add(letters: String(spacelessQuery.dropLast(length)), numeral: numeral)
+                        spacelessCarriesNumeral = true
                         break
                     }
                 }
             }
+        }
+        // The plain spaceless form stands only when no numeral
+        // was parsed out of it — as a numeral-less form it would
+        // prefix-match across numerals (D-24's "gtav" ⊂ "gtavi").
+        if !spacelessCarriesNumeral {
+            add(letters: spacelessQuery, numeral: nil)
         }
         return forms
     }
@@ -267,6 +397,16 @@ final class GPLibraryViewController: GPBaseViewController {
         case "favourites": filter = .favourites
         default: filter = .all
         }
+        // D-18: this is the external landing route (the Host
+        // page's "View in Library" and Home's rails share it), so
+        // clear any retained search too — the rebuild applies the
+        // search field's text after the filter, and a stale query
+        // would land the user on a subset of the filter's games,
+        // or on "No games match". (Library's own chip taps do not
+        // come through here and keep the search untouched.)
+        searchWorkItem?.cancel()
+        searchWorkItem = nil
+        searchField.text = ""
         refreshChips()
         requestContentRebuild()
     }

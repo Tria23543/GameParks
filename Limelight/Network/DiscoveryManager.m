@@ -22,7 +22,14 @@
 
 @implementation DiscoveryManager {
     NSMutableArray* _hostQueue;
-    NSMutableSet* _pausedHosts;
+    // GP v2.8 (D-15): paused hosts are tracked by UUID string, not
+    // in an NSMutableSet keyed by TemporaryHost's UUID-based hash —
+    // populateHost: can assign/rewrite a host's UUID while it is
+    // paused, which would strand its set entry under the old hash.
+    // Hosts with no UUID at pause time are kept in a separate list
+    // matched by pointer identity.
+    NSMutableDictionary* _pausedHostsByUUID;
+    NSMutableArray* _pausedUUIDlessHosts;
     id<DiscoveryCallback> _callback;
     MDNSManager* _mdnsMan;
     NSOperationQueue* _opQueue;
@@ -39,7 +46,8 @@
     _callback = callback;
     shouldDiscover = NO;
     _hostQueue = [NSMutableArray array];
-    _pausedHosts = [NSMutableSet set];
+    _pausedHostsByUUID = [NSMutableDictionary dictionary];
+    _pausedUUIDlessHosts = [NSMutableArray array];
     for (TemporaryHost* host in hosts)
     {
         [self addHostToDiscovery:host];
@@ -209,6 +217,16 @@
 
         if (![self addHostToDiscovery:host]) {
             callback(nil, @"Host information updated");
+        } else if (shouldAddToDiscovery != nil && !shouldAddToDiscovery()) {
+            // GP v2.8 (D-13): the check above and the add are not
+            // atomic — the sweep may have been abandoned/superseded
+            // while addHostToDiscovery: ran (it can start a worker).
+            // Re-check now that the host is queued and undo the add
+            // through the normal removal path (which cancels the
+            // just-started worker by the B-06 matcher first) so the
+            // host does not remain queued from a superseded sweep.
+            [self removeHostFromDiscovery:host];
+            callback(nil, @"Discovery superseded");
         } else {
             callback(host, nil);
         }
@@ -224,6 +242,52 @@
     [_mdnsMan forgetHosts];
 }
 
+// GP v2.8 (D-15): paused-host bookkeeping. All three helpers must
+// be called while holding @synchronized (_hostQueue), as every
+// existing _pausedHosts use did. A paused entry is found again even
+// if the host's UUID was assigned/rewritten while paused: removal
+// and lookup sweep the dictionary by value identity as well as by
+// the host's current UUID key, and the UUID-less list is matched by
+// pointer identity only.
+- (BOOL) isHostPaused:(TemporaryHost *)host {
+    if (host.uuid.length > 0 && _pausedHostsByUUID[host.uuid] != nil) {
+        return YES;
+    }
+    for (TemporaryHost* pausedHost in [_pausedHostsByUUID allValues]) {
+        if (pausedHost == host) {
+            return YES;
+        }
+    }
+    return [_pausedUUIDlessHosts indexOfObjectIdenticalTo:host] != NSNotFound;
+}
+
+- (void) addPausedHost:(TemporaryHost *)host {
+    if (host.uuid.length > 0) {
+        _pausedHostsByUUID[host.uuid] = host;
+    } else if ([_pausedUUIDlessHosts indexOfObjectIdenticalTo:host] == NSNotFound) {
+        [_pausedUUIDlessHosts addObject:host];
+    }
+}
+
+- (void) removePausedHost:(TemporaryHost *)host {
+    if (host.uuid.length > 0) {
+        [_pausedHostsByUUID removeObjectForKey:host.uuid];
+    }
+    // The entry may be stored under the host's pre-rewrite UUID;
+    // drop every entry whose value is this exact object.
+    NSMutableArray* staleKeys = [NSMutableArray array];
+    for (NSString* uuid in _pausedHostsByUUID) {
+        if (_pausedHostsByUUID[uuid] == host) {
+            [staleKeys addObject:uuid];
+        }
+    }
+    [_pausedHostsByUUID removeObjectsForKeys:staleKeys];
+    NSUInteger identityIndex = [_pausedUUIDlessHosts indexOfObjectIdenticalTo:host];
+    if (identityIndex != NSNotFound) {
+        [_pausedUUIDlessHosts removeObjectAtIndex:identityIndex];
+    }
+}
+
 - (void) startDiscovery {
     if (shouldDiscover) {
         return;
@@ -235,7 +299,7 @@
     
     @synchronized (_hostQueue) {
         for (TemporaryHost* host in _hostQueue) {
-            if (![_pausedHosts containsObject:host]) {
+            if (![self isHostPaused:host]) {
                 [_opQueue addOperation:[self createWorkerForHost:host]];
             }
         }
@@ -337,7 +401,7 @@
         }
 
         [_hostQueue removeObject:host];
-        [_pausedHosts removeObject:host];
+        [self removePausedHost:host];
     }
 }
 
@@ -351,14 +415,14 @@
         }
 
         // Add it to the paused hosts list
-        [_pausedHosts addObject:host];
+        [self addPausedHost:host];
     }
 }
 
 - (void) resumeDiscoveryForHost:(TemporaryHost *)host {
     @synchronized (_hostQueue) {
         // Remove it from the paused hosts list
-        [_pausedHosts removeObject:host];
+        [self removePausedHost:host];
 
         // Start discovery again. GP v2.6 (B-06): poll the queue's
         // own instance for this UUID, so the new worker updates the
@@ -372,7 +436,20 @@
         if (shouldDiscover) {
             TemporaryHost *queuedHost = host.uuid.length > 0 ? [self getHostInDiscovery:host.uuid] : nil;
             if (queuedHost != nil) {
-                [_opQueue addOperation:[self createWorkerForHost:queuedHost]];
+                // GP v2.8 (D-14): pause/remove already scan the
+                // queue with the B-06 matcher before acting; do the
+                // same here so an unpaired/duplicate resume cannot
+                // stack a second perpetual poller for this host.
+                BOOL workerAlreadyRunning = NO;
+                for (DiscoveryWorker* worker in [_opQueue operations]) {
+                    if (![worker isCancelled] && [self worker:worker matchesHost:queuedHost]) {
+                        workerAlreadyRunning = YES;
+                        break;
+                    }
+                }
+                if (!workerAlreadyRunning) {
+                    [_opQueue addOperation:[self createWorkerForHost:queuedHost]];
+                }
             }
         }
     }

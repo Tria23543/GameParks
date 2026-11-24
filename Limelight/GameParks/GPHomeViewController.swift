@@ -417,12 +417,4 @@ final class GPHomeViewController: GPBaseViewController {
         if let renderingHost = renderingHost { return renderingHost }
         return GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first
     }
-
-    private func mostRecentApp(for host: TemporaryHost) -> TemporaryApp? {
-        return GPCatalog.sortedApps(for: host)
-            .map { (app: $0, date: GPStats.shared.lastPlayed(forAppKey: GPCatalog.appKey(host: host, app: $0))) }
-            .filter { $0.date != nil }
-            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
-            .first?.app
-    }
 }

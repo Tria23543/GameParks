@@ -640,8 +640,13 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 
         if (![serverInfoResp isStatusOk]) {
             Log(LOG_W, @"Failed to get server info: %@", serverInfoResp.statusMessage);
-            [self endActivationForKey:hostKey generation:generation];
             dispatch_async(dispatch_get_main_queue(), ^{
+                // GP v2.8 (D-07): end the coalescing registration
+                // inside the main-queue block, before the currency
+                // check — mirroring the fetch paths — so a
+                // same-generation retry cannot register (and then
+                // be failed by this stale block) in between.
+                [self endActivationForKey:hostKey generation:generation];
                 // GP v2.5 (A-55): never apply a stale failure.
                 if (![self resultIsCurrentForHost:host generation:generation key:hostKey]) {
                     return;
@@ -696,7 +701,11 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             while (samples.count > 10) {
                 [samples removeObjectAtIndex:0];
             }
-            self->_pingSamplesMs[host.uuid] = samples;
+            // GP v2.8 (D-11): a nil key raises on subscript
+            // assignment — skip the write for a UUID-less host.
+            if (host.uuid != nil) {
+                self->_pingSamplesMs[host.uuid] = samples;
+            }
             [self postHostsChanged];
         });
 
@@ -818,9 +827,23 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 /// at T1+120 s and reveals Try again → only if nothing recovers
 /// does this watchdog deliver the failure, at T1+150 s.
 - (void)armPairingWatchdogForGeneration:(NSUInteger)generation {
-    NSTimeInterval delay = 120;
-    if (_pairingPINWindowEnd != nil) {
-        delay = MAX([_pairingPINWindowEnd timeIntervalSinceNow] + 30, 1);
+    // GP v2.8 (D-08): the caller runs on a background queue, but
+    // A-54 confines _pairingPINWindowEnd to the main queue — read
+    // the window on main at arm time (synchronously, the same
+    // claim/store discipline as startPairingWithHost:; the re-arm
+    // from the wake block below is already on main and reads
+    // directly). The deadline math is unchanged: no PIN → 120 s,
+    // PIN delivered → window end + 30 s.
+    __block NSTimeInterval delay = 120;
+    void (^computeDelay)(void) = ^{
+        if (self->_pairingPINWindowEnd != nil) {
+            delay = MAX([self->_pairingPINWindowEnd timeIntervalSinceNow] + 30, 1);
+        }
+    };
+    if ([NSThread isMainThread]) {
+        computeDelay();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), computeDelay);
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -899,6 +922,12 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         if (generation != self->_pairingGeneration) {
             return; // GP v2.5 (A-13): stale attempt — ignore.
         }
+        // GP v2.8 (D-09): advance the generation on exit, like
+        // the watchdog, so a second terminal callback from this
+        // same attempt fails the A-13 gate above. Nothing below
+        // re-checks the generation, so this exit's own result
+        // posting, clearing and fetch still run as before.
+        self->_pairingGeneration += 1;
         self->_currentPairManager = nil;
         // GP: apply the result to the host that was actually paired
         // (upstream applies it to its selected host; v1.2 shipped a
@@ -935,6 +964,9 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         if (generation != self->_pairingGeneration) {
             return; // GP v2.5 (A-13): stale attempt — ignore.
         }
+        // GP v2.8 (D-09): advance the generation on exit, like
+        // the watchdog — see pairSuccessful:generation:.
+        self->_pairingGeneration += 1;
         self->_currentPairManager = nil;
         BOOL cancelled = self->_pairingCancelled;
         self->_pairingInProgress = NO;
@@ -960,6 +992,9 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         if (generation != self->_pairingGeneration) {
             return; // GP v2.5 (A-13): stale attempt — ignore.
         }
+        // GP v2.8 (D-09): advance the generation on exit, like
+        // the watchdog — see pairSuccessful:generation:.
+        self->_pairingGeneration += 1;
         self->_currentPairManager = nil;
         TemporaryHost *host = self->_pairingHost ?: self->_selectedHost;
         self->_pairingInProgress = NO;
@@ -1042,8 +1077,12 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                 // GP: the failure is recorded and posted so the
                 // screens show an honest state with Retry, where
                 // upstream shows an alert and drops to host selection.
-                self->_appListErrors[host.uuid] =
-                    appListResp.statusMessage ?: @"Could not load the game list.";
+                // GP v2.8 (D-11): a nil key raises on subscript
+                // assignment — skip the write for a UUID-less host.
+                if (host.uuid != nil) {
+                    self->_appListErrors[host.uuid] =
+                        appListResp.statusMessage ?: @"Could not load the game list.";
+                }
                 host.state = StateOffline; // upstream does this too
                 [self postAppListChanged:host];
                 [self postHostsChanged];

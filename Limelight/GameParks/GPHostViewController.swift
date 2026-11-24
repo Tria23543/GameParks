@@ -16,6 +16,10 @@ final class GPHostViewController: GPBaseViewController {
 
     private let hostUUID: String
     private let hostName: String
+    /// D-17: the secondary identity captured at init, used to
+    /// tie-break duplicate-name re-resolution.
+    private let hostMAC: String?
+    private let hostAddresses: Set<String>
     private var host: TemporaryHost
     private let dynamicStack = UIStackView()
     /// A-76: header labels, refreshed in rebuildContent.
@@ -31,6 +35,8 @@ final class GPHostViewController: GPBaseViewController {
         self.host = host
         self.hostUUID = host.uuid ?? ""
         self.hostName = host.name ?? ""
+        self.hostMAC = host.mac
+        self.hostAddresses = gpKnownAddresses(of: host)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -86,9 +92,13 @@ final class GPHostViewController: GPBaseViewController {
         // match fails, not only when the captured UUID is empty —
         // a server-side UUID rewrite otherwise froze this page on
         // the stale host object. UUID match still comes first.
+        // D-17: the shared helper tie-breaks duplicate names by
+        // the secondary identity captured at init; an ambiguous
+        // result is no substitution, i.e. exactly the no-match
+        // path below (the B-09 latch is not cleared for it).
         let hosts = GPSessionController.shared().hosts
-        if let current = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
-            ?? hosts.first(where: { $0.name == hostName }) {
+        if let current = gpResolveHost(in: hosts, uuid: hostUUID, name: hostName,
+                                       mac: hostMAC, addresses: hostAddresses) {
             host = current
             // B-09: a successful re-resolution clears the
             // unavailable latch — if the PC came back, the page
@@ -108,8 +118,12 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func hostInfoError(_ note: Notification) {
+        // D-19: compare against the LIVE host, not the captured
+        // hostUUID — after a C-23 re-resolution the page's host
+        // carries the new UUID, and errors posted for it must
+        // still reach this page's alert.
         guard navigationController?.topViewController === self,
-              let errorHost = note.object as? TemporaryHost, errorHost.uuid == hostUUID,
+              let errorHost = note.object as? TemporaryHost, errorHost === host || errorHost.uuid == host.uuid,
               let message = note.userInfo?[GPHostInfoErrorMessageKey] as? String else {
             return
         }
@@ -309,7 +323,7 @@ final class GPHostViewController: GPBaseViewController {
 
     @objc private func addGameTapped() {
         presentAlert(title: "Add a game",
-                     message: "Games are added on the PC, in Sunshine: open the Sunshine web UI, go to Applications, and add any .exe — Steam is not required. It appears here and in your library automatically.")
+                     message: "Games are added on the PC, in Sunshine: open the Sunshine web UI, go to Applications, and add any .exe — Steam is not required. It appears here and in your Library automatically.")
     }
 
     @objc private func removeTapped() {
@@ -319,8 +333,14 @@ final class GPHostViewController: GPBaseViewController {
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
             guard let self = self else { return }
+            // D-20: no pop here — removeHost: posts hosts-changed
+            // synchronously, and this page's stateChanged (the
+            // A-24 path) already pops a topmost page. A second
+            // pop landed one screen too far when this page was
+            // pushed over a Game page. If the page is somehow not
+            // topmost, stateChanged's B-08/B-09 unavailable state
+            // with Back is the fallback.
             GPSessionController.shared().removeHost(self.host)
-            self.navigationController?.popViewController(animated: true)
         })
         present(alert, animated: true)
     }

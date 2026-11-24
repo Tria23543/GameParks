@@ -357,31 +357,33 @@ enum GPCatalog {
                     // partial pixels as a permanent cover. Force the
                     // source's full raster to decode by drawing it
                     // into a bitmap context at its (B-11-capped)
-                    // natural size, and confirm something actually
-                    // rasterised; a draw that leaves the buffer
-                    // entirely zero produced no pixels and is a
-                    // decode failure, feeding the deletion below.
-                    var rasterised = false
+                    // natural size.
+                    // GP v2.8 (D-04): the probe no longer scans the
+                    // buffer for a non-zero byte. With
+                    // premultipliedLast, a fully transparent (valid)
+                    // image premultiplies to an all-zero raster, so
+                    // the scan classified it as a decode failure and
+                    // the C-07 deletion below removed it on every
+                    // rebuild — a delete -> refetch loop for art that
+                    // can never pass. Decoded and drawn without error
+                    // is now a decode SUCCESS even when the raster is
+                    // all-zero, and a file is never deleted solely
+                    // for an all-zero raster. Genuine failures are
+                    // unchanged: no image/CGImage, or the probe
+                    // context cannot be created.
+                    var probeSucceeded = false
                     let probeWidth = max(1, Int(drawSize.width.rounded()))
                     let probeHeight = max(1, Int(drawSize.height.rounded()))
-                    if let probe = CGContext(data: nil, width: probeWidth, height: probeHeight,
+                    if image.cgImage != nil, let probe = CGContext(data: nil, width: probeWidth, height: probeHeight,
                                              bitsPerComponent: 8, bytesPerRow: 0,
                                              space: CGColorSpaceCreateDeviceRGB(),
                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
                         UIGraphicsPushContext(probe)
                         image.draw(in: CGRect(x: 0, y: 0, width: probeWidth, height: probeHeight))
                         UIGraphicsPopContext()
-                        if let buffer = probe.data {
-                            let byteCount = probe.bytesPerRow * probe.height
-                            let bytes = buffer.bindMemory(to: UInt8.self, capacity: byteCount)
-                            var index = 0
-                            while index < byteCount {
-                                if bytes[index] != 0 { rasterised = true; break }
-                                index += 1
-                            }
-                        }
+                        probeSucceeded = true
                     }
-                    if rasterised {
+                    if probeSucceeded {
                         // Force the decode here, on this queue, by drawing
                         // the image once (the same trick upstream's
                         // loadBoxArtForCaching uses against scroll jank) —

@@ -21,6 +21,41 @@
 import UIKit
 import GameController
 
+/// The host's addresses usable as a secondary identity (D-17):
+/// the local and active addresses, as available at capture time.
+func gpKnownAddresses(of host: TemporaryHost) -> Set<String> {
+    return Set([host.localAddress, host.activeAddress].compactMap { $0 }.filter { !$0.isEmpty })
+}
+
+/// D-17: the shared C-23 re-resolution used by the Connecting,
+/// Game and Host screens. A UUID match comes first (unchanged);
+/// otherwise the name matches are collected — exactly one is the
+/// C-23 substitution (unchanged). With more than one same-named
+/// host, the matches are filtered by secondary-field agreement
+/// with the identity captured at init: MAC where both sides have
+/// one, else overlap of the known (local/active) addresses.
+/// Exactly one survivor substitutes; zero or several survivors
+/// is no substitution at all (nil), never a first-in-list guess.
+func gpResolveHost(in hosts: [TemporaryHost], uuid: String, name: String,
+                   mac: String?, addresses: Set<String>) -> TemporaryHost? {
+    if !uuid.isEmpty, let byUUID = hosts.first(where: { $0.uuid == uuid }) {
+        return byUUID
+    }
+    let nameMatches = hosts.filter { $0.name == name }
+    if nameMatches.count == 1 {
+        return nameMatches.first
+    }
+    guard nameMatches.count > 1 else { return nil }
+    let survivors = nameMatches.filter { candidate in
+        if let capturedMAC = mac, !capturedMAC.isEmpty,
+           let candidateMAC = candidate.mac, !candidateMAC.isEmpty {
+            return candidateMAC == capturedMAC
+        }
+        return !gpKnownAddresses(of: candidate).isDisjoint(with: addresses)
+    }
+    return survivors.count == 1 ? survivors.first : nil
+}
+
 final class GPConnectingViewController: GPBaseViewController {
     private var session: GPSessionController { GPSessionController.shared() }
 
@@ -34,6 +69,14 @@ final class GPConnectingViewController: GPBaseViewController {
 
     private let hostUUID: String
     private let hostName: String
+    /// D-17: the secondary identity captured at init, used to
+    /// tie-break duplicate-name re-resolution.
+    private let hostMAC: String?
+    private let hostAddresses: Set<String>
+    /// D-17: set when re-resolution found several same-named
+    /// hosts and no secondary-field survivor — the launch must
+    /// fail rather than stream from the stale host object.
+    private var hostAmbiguous = false
     private var host: TemporaryHost
     private let app: TemporaryApp
 
@@ -61,6 +104,8 @@ final class GPConnectingViewController: GPBaseViewController {
         self.app = app
         self.hostUUID = host.uuid ?? ""
         self.hostName = host.name
+        self.hostMAC = host.mac
+        self.hostAddresses = gpKnownAddresses(of: host)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -84,9 +129,16 @@ final class GPConnectingViewController: GPBaseViewController {
         let settingsHeight = settings?.height?.intValue ?? 1080
         let settingsFps = settings?.framerate?.intValue ?? 60
         let streamSummary = "\(settingsHeight == 2160 ? "4K" : "\(settingsHeight)p")\(settingsFps)"
+        // D-23: resume counts only when BOTH ids are non-empty
+        // and equal (the A-77 discipline GPGame's isThisApp
+        // uses) — an optional-to-optional comparison is true
+        // when both ids are nil.
+        let runningID = GPSessionController.shared().runningApp(for: host)?.id ?? ""
+        let appID = app.id ?? ""
+        let resuming = !runningID.isEmpty && !appID.isEmpty && runningID == appID
         let stepTitles = [
             "Waking \(host.name ?? "your PC")",
-            GPSessionController.shared().runningApp(for: host)?.id == app.id ? "Resuming the game" : "Starting the game",
+            resuming ? "Resuming the game" : "Starting the game",
             "Negotiating stream · \(streamSummary)",
             "Controller connected",
         ]
@@ -404,6 +456,15 @@ final class GPConnectingViewController: GPBaseViewController {
         // session holds it *now* — address, cert and codec support
         // all come from app.host at build time.
         refreshHost()
+        // D-17: an ambiguous duplicate-name re-resolution never
+        // substituted, so `host` is still the stale object —
+        // building a config from it could stream the wrong PC.
+        // Fail through this step's existing failure path instead.
+        if hostAmbiguous {
+            setStep(2, state: .failed)
+            showFailure(message: "The stream couldn't be set up for \(app.name ?? "this game"). Try again, or restart Sunshine on the PC.")
+            return
+        }
         app.host = host
         let session = GPSessionController.shared()
         guard let streamVC = session.streamViewController(for: app) else {
@@ -453,10 +514,21 @@ final class GPConnectingViewController: GPBaseViewController {
         // match fails, not only when the captured UUID is empty —
         // a server-side UUID rewrite otherwise kept the freeze
         // B-35 described. UUID match still comes first.
+        // D-17: the shared helper tie-breaks duplicate names by
+        // the secondary identity captured at init and substitutes
+        // nothing when the tie-break is itself ambiguous.
         let hosts = GPSessionController.shared().hosts
-        if let current = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
-            ?? hosts.first(where: { $0.name == hostName }) {
+        if let current = gpResolveHost(in: hosts, uuid: hostUUID, name: hostName,
+                                       mac: hostMAC, addresses: hostAddresses) {
             host = current
+            hostAmbiguous = false
+        } else {
+            // No substitution. That is the plain no-match case
+            // (the stale host is kept, as before) exactly when
+            // there is at most one same-named host; several
+            // same-named hosts with no survivor is the ambiguous
+            // case stepNegotiate must fail on.
+            hostAmbiguous = hosts.filter { $0.name == hostName }.count > 1
         }
     }
 }

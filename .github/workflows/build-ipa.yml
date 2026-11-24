@@ -10,6 +10,12 @@ on:
       - 'Moonlight.xcodeproj/**'
       - '.github/workflows/build-ipa.yml'
 
+# D-28: declare the least-privilege token scope explicitly — the job
+# only reads the checkout and uploads an artifact. Without this block
+# the job runs with the repository-default GITHUB_TOKEN scope.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-15-intel

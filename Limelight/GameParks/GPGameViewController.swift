@@ -22,6 +22,10 @@ final class GPGameViewController: GPBaseViewController {
     /// was opened.
     private var appName: String
     private let hostName: String
+    /// D-17: the secondary identity captured at init, used to
+    /// tie-break duplicate-name re-resolution.
+    private let hostMAC: String?
+    private let hostAddresses: Set<String>
     private var host: TemporaryHost
     private var app: TemporaryApp
     private let dynamicStack = UIStackView()
@@ -38,6 +42,8 @@ final class GPGameViewController: GPBaseViewController {
         self.appID = app.id ?? ""
         self.appName = app.name ?? ""
         self.hostName = (host.name as String?) ?? ""
+        self.hostMAC = host.mac
+        self.hostAddresses = gpKnownAddresses(of: host)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -103,8 +109,12 @@ final class GPGameViewController: GPBaseViewController {
         // match fails, not only when the captured UUID is empty —
         // a server-side UUID rewrite otherwise froze this page on
         // the stale host object. UUID match still comes first.
-        guard let currentHost = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
-            ?? hosts.first(where: { $0.name == hostName }) else {
+        // D-17: the shared helper tie-breaks duplicate names by
+        // the secondary identity captured at init; an ambiguous
+        // result is no substitution, i.e. exactly the no-match
+        // path below (the B-09 latch is not cleared for it).
+        guard let currentHost = gpResolveHost(in: hosts, uuid: hostUUID, name: hostName,
+                                              mac: hostMAC, addresses: hostAddresses) else {
             markUnavailable()
             return
         }

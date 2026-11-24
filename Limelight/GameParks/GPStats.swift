@@ -248,10 +248,10 @@ final class GPStats {
         // Fall back to the records only for data the aggregates
         // predate (an aggregate entry with no last-played date).
         // A-45: when the most recent session *ended*, not started.
-        guard let latest = records.filter({ $0.appKey == key }).max(by: { $0.start < $1.start }) else {
-            return nil
-        }
-        return latest.start.addingTimeInterval(latest.duration)
+        // D-27: fold max over session ends directly, matching
+        // appendRecord's convention.
+        return records.filter({ $0.appKey == key })
+            .map { $0.start.addingTimeInterval($0.duration) }.max()
     }
 
     /// (appKey, appName, seconds) sorted by playtime, longest first.
@@ -315,8 +315,11 @@ final class GPStats {
                         var lastPlayed: Date?
                         if let lastPlayedTs = entry["lastPlayed"] as? Double {
                             lastPlayed = Date(timeIntervalSince1970: lastPlayedTs)
-                        } else if let latest = records.filter({ $0.appKey == key }).max(by: { $0.start < $1.start }) {
-                            lastPlayed = latest.start.addingTimeInterval(latest.duration)
+                        } else if let latestEnd = records.filter({ $0.appKey == key })
+                            .map({ $0.start.addingTimeInterval($0.duration) }).max() {
+                            // D-27: latest session end, as in
+                            // appendRecord — not latest start.
+                            lastPlayed = latestEnd
                             seededLastPlayed = true
                         }
                         lifetimePerGame[key] = (name: name, seconds: gameSeconds, lastPlayed: lastPlayed)

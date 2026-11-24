@@ -70,16 +70,65 @@ static const int MAX_ATTEMPTS = 5;
             // GP v2.7 (C-04): UIImage decoding is lazy and -size
             // comes from the header, so the old probe let a
             // header-valid truncated body pass. Force a real decode
-            // by rendering the probe at its full size into a bitmap
-            // context; a failed render means the body does not
-            // decode and must not be written.
+            // by rendering the probe into a bitmap context; a failed
+            // render means the body does not decode and must not be
+            // written.
+            // GP v2.8 (D-02): the render is capped like the display
+            // side (GPCatalog's B-11 cap, ~10 MP): a probe whose
+            // pixel count exceeds the cap — or whose dimensions are
+            // zero/negative — is rejected BEFORE any bitmap is
+            // allocated, so a hostile or corrupt header cannot force
+            // a huge allocation. The rejection is a transient
+            // OtherFailure, never DefinitiveNoArt: the host may well
+            // have art, just art this side will not render.
+            // GP v2.8 (D-03): the probe draws into a raw CGContext
+            // over a zero-filled buffer (premultipliedLast, mirroring
+            // the display side) and scans the bytes afterwards:
+            // "decodable" means at least one non-zero byte appeared.
+            // The old UIGraphics probe could not detect a raster
+            // that decoded nothing — its opaque, pre-filled context
+            // always yielded an image. Composition: an opaque image
+            // always sets alpha bytes 0xFF, so all-black opaque art
+            // still passes; a fully transparent image scans all-zero
+            // and fails (accepted — it is invisible art, and the
+            // display side no longer deletes for an all-zero raster,
+            // D-04). The C-04 limit is unchanged: a truncated body
+            // rasterising partial non-blank pixels still passes.
             BOOL decodable = NO;
-            if (probe != nil && probe.size.width > 0 && probe.size.height > 0) {
-                UIGraphicsBeginImageContextWithOptions(probe.size, YES, 1.0);
-                [probe drawInRect:CGRectMake(0, 0, probe.size.width, probe.size.height)];
-                UIImage *rendered = UIGraphicsGetImageFromCurrentImageContext();
-                UIGraphicsEndImageContext();
-                decodable = (rendered != nil);
+            BOOL probeRejected = NO;
+            if (probe != nil) {
+                double pixelCount = (double)probe.size.width * (double)probe.size.height;
+                if (probe.size.width <= 0 || probe.size.height <= 0 || pixelCount > 10000000) {
+                    probeRejected = YES;
+                } else {
+                    NSUInteger probeWidth = (NSUInteger)llround(probe.size.width);
+                    NSUInteger probeHeight = (NSUInteger)llround(probe.size.height);
+                    CGImageRef cgImage = probe.CGImage;
+                    if (cgImage != NULL && probeWidth > 0 && probeHeight > 0) {
+                        size_t bytesPerRow = probeWidth * 4;
+                        // calloc: the buffer starts zero-filled, so
+                        // any non-zero byte after the draw was put
+                        // there by the raster.
+                        unsigned char *buffer = calloc(probeHeight, bytesPerRow);
+                        if (buffer != NULL) {
+                            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+                            CGContextRef context = CGBitmapContextCreate(buffer, probeWidth, probeHeight, 8, bytesPerRow, colorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+                            CGColorSpaceRelease(colorSpace);
+                            if (context != NULL) {
+                                CGContextDrawImage(context, CGRectMake(0, 0, probeWidth, probeHeight), cgImage);
+                                size_t byteCount = bytesPerRow * probeHeight;
+                                for (size_t index = 0; index < byteCount; index++) {
+                                    if (buffer[index] != 0) {
+                                        decodable = YES;
+                                        break;
+                                    }
+                                }
+                                CGContextRelease(context);
+                            }
+                            free(buffer);
+                        }
+                    }
+                }
             }
             if (decodable) {
                 // GP v2.5 (A-64): a cancelled retriever must not write.
@@ -104,6 +153,21 @@ static const int MAX_ATTEMPTS = 5;
                 // GP v2.5 (A-04): atomic write, result checked; the
                 // callback below reports success only when this wrote.
                 success = [data writeToFile:boxArtPath atomically:YES];
+                // GP v2.8 (D-01): the pre-write checks above are a
+                // check-then-write window — a signature change (or
+                // cancellation) landing between them and the atomic
+                // write would still bless pre-change art. Re-check
+                // both immediately AFTER a successful write and, if
+                // stale or cancelled, delete the just-written file
+                // and report the write as failed: success = NO makes
+                // the callback report failure, and OtherFailure
+                // below can neither stamp the no-art memory (only
+                // DefinitiveNoArt may) nor be read as a genuine
+                // fetch success (only WroteFile is).
+                if (success && ([self isCancelled] || (self.artEpochStillCurrentBlock != nil && !self.artEpochStillCurrentBlock()))) {
+                    [[NSFileManager defaultManager] removeItemAtPath:boxArtPath error:nil];
+                    success = NO;
+                }
                 if (success) {
                     outcome = AppAssetRetrievalOutcomeWroteFile;
                 } else {
@@ -119,7 +183,12 @@ static const int MAX_ATTEMPTS = 5;
             // the retry below — but remember this attempt proved
             // no-art, so if the budget runs out on undecodable 200s
             // the outcome is definitive (GP v2.7, C-05).
-            attemptProvedNoArt = YES;
+            // GP v2.8 (D-02): a probe rejected for size/dimensions
+            // proved nothing about art existing — it must not set
+            // this flag, so its outcome stays OtherFailure.
+            if (!probeRejected) {
+                attemptProvedNoArt = YES;
+            }
         }
 
         if (attemptProvedNoArt) {

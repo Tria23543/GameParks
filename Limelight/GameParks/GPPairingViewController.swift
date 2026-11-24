@@ -33,6 +33,14 @@ final class GPPairingViewController: UIViewController {
     // when it installs its callbacks — dismissal restores the saved
     // callbacks only while the token is still this sheet's.
     private let callbackToken = NSObject()
+    // D-12: whether this sheet acquired the callback slots at
+    // load (the C-17 install step). A sheet that did not is inert
+    // as well as callback-clean: it must not start pairing, and
+    // its Cancel / Try again must not touch the session-global
+    // attempt the owning sheet is running.
+    private var ownsPairingCallbacks: Bool {
+        GPSessionController.shared().pairingCallbackOwner === callbackToken
+    }
     // A-52: the displayed PIN does not wait forever.
     private var pinTimeoutWorkItem: DispatchWorkItem?
 
@@ -152,6 +160,10 @@ final class GPPairingViewController: UIViewController {
         // (delivered synchronously by the engine) has somewhere to go.
         guard !didStartPairing else { return }
         didStartPairing = true
+        // D-12: a blocked sheet (C-17) never acquired the callback
+        // slots, so it must not start a pairing attempt either —
+        // the attempt is session-global and belongs to the owner.
+        guard ownsPairingCallbacks else { return }
         GPSessionController.shared().pairSelectedHost()
     }
 
@@ -176,6 +188,12 @@ final class GPPairingViewController: UIViewController {
     }
 
     @objc private func tryAgainTapped() {
+        // D-12: a blocked sheet must not cancel or re-pair the
+        // owner's session-global attempt — it only dismisses.
+        guard ownsPairingCallbacks else {
+            cleanupAndDismiss()
+            return
+        }
         pinTimeoutWorkItem?.cancel()
         pinTimeoutWorkItem = nil
         tryAgainButton.isHidden = true
@@ -218,7 +236,12 @@ final class GPPairingViewController: UIViewController {
     }
 
     @objc private func cancelTapped() {
-        GPSessionController.shared().cancelPairing()
+        // D-12: only the sheet that owns the callback slots may
+        // cancel the session-global attempt; a blocked sheet's
+        // Cancel dismisses itself without touching it.
+        if ownsPairingCallbacks {
+            GPSessionController.shared().cancelPairing()
+        }
         cleanupAndDismiss()
     }
 
