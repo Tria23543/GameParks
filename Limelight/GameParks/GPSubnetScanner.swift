@@ -27,20 +27,41 @@ final class GPSubnetScanner {
     /// The GameStream HTTP port (Sunshine / GeForce Experience).
     private static let gameStreamPort: UInt16 = 47989
     private static let probeTimeoutMs: Int32 = 700
+    /// Upper bound on one address's validation. discoverHost performs
+    /// synchronous HTTP whose waits are bounded only by NSURLSession's
+    /// longest timeout; a host that accepts TCP but never answers
+    /// would otherwise park the probe — and with it the whole scan.
+    private static let validationTimeout: TimeInterval = 8
     private static let maxConcurrentProbes = 40
 
-    private let scanQueue = DispatchQueue(label: "com.gameparks.subnetscan",
-                                          qos: .userInitiated,
-                                          attributes: .concurrent)
+    /// Bounded-concurrency probe pool. (v1.1 enqueued one block per
+    /// address on a concurrent GCD queue and parked ~253 threads on a
+    /// semaphore to gate them; an OperationQueue expresses the same
+    /// limit structurally, without the parked threads.)
+    private let probeQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = maxConcurrentProbes
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
     private var generation = 0
     private let generationLock = NSLock()
 
     /// Invalidates any sweep still running; its remaining probes are
     /// skipped and its hosts are dropped.
     func cancel() {
+        _ = bumpGeneration()
+    }
+
+    /// Increment-and-read as ONE locked operation: two concurrent
+    /// scans can never end up sharing a generation (and so failing
+    /// to invalidate each other).
+    private func bumpGeneration() -> Int {
         generationLock.lock()
         generation += 1
+        let gen = generation
         generationLock.unlock()
+        return gen
     }
 
     private func currentGeneration() -> Int {
@@ -51,39 +72,63 @@ final class GPSubnetScanner {
 
     /// Sweeps the phone's Wi-Fi subnet once. `onHost` is called (on a
     /// background queue) for every newly validated host; `completion`
-    /// is called on the main queue when the sweep ends.
+    /// is called exactly once, on the main queue, with true if the
+    /// sweep ran to completion and false if it was superseded,
+    /// cancelled, or there was no subnet to sweep.
     func scan(discoveryManager: DiscoveryManager,
               onHost: @escaping (TemporaryHost) -> Void,
-              completion: @escaping () -> Void) {
-        cancel()
-        let gen = currentGeneration()
+              completion: @escaping (Bool) -> Void) {
+        let gen = bumpGeneration()
         guard let addresses = Self.localSubnetAddresses() else {
-            DispatchQueue.main.async(execute: completion)
+            // No Wi-Fi subnet is NOT the same as "no PCs found" —
+            // report it distinctly so the caller does not throttle
+            // the next attempt as if a sweep had really run.
+            DispatchQueue.main.async { completion(false) }
             return
         }
         let group = DispatchGroup()
-        let semaphore = DispatchSemaphore(value: Self.maxConcurrentProbes)
         for address in addresses {
             group.enter()
-            scanQueue.async {
-                semaphore.wait()
-                if self.currentGeneration() == gen, Self.isGameStreamPortOpen(address) {
-                    // Validates /serverinfo and builds the host exactly
-                    // like manual add-by-IP. It blocks until answered,
-                    // so it runs here on the scan queue, never on main.
-                    discoveryManager.discoverHost(address) { host, _ in
-                        if let host = host, self.currentGeneration() == gen {
-                            onHost(host)
-                        }
-                    }
+            probeQueue.addOperation {
+                // leave() is guaranteed whatever happens below,
+                // including a validation that has to be abandoned.
+                defer { group.leave() }
+                guard self.currentGeneration() == gen,
+                      Self.isGameStreamPortOpen(address),
+                      // Re-check after the probe: a cancel that landed
+                      // during it must not start a full validation
+                      // for a sweep already declared invalid.
+                      self.currentGeneration() == gen else {
+                    return
                 }
-                semaphore.signal()
-                group.leave()
+                if let host = Self.validate(address: address, discoveryManager: discoveryManager),
+                   self.currentGeneration() == gen {
+                    onHost(host)
+                }
             }
         }
         group.notify(queue: .main) {
-            completion()
+            completion(self.currentGeneration() == gen)
         }
+    }
+
+    /// Runs DiscoveryManager.discoverHost on a side queue and waits
+    /// with a bound. On timeout the probe is abandoned (nil); the
+    /// orphaned request is left to time out on its own queue, so one
+    /// silent host can no longer stall the sweep or its completion.
+    private static func validate(address: String, discoveryManager: DiscoveryManager) -> TemporaryHost? {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: TemporaryHost?
+        DispatchQueue.global(qos: .userInitiated).async {
+            discoveryManager.discoverHost(address) { host, _ in
+                result = host
+                semaphore.signal()
+            }
+        }
+        guard semaphore.wait(timeout: .now() + validationTimeout) == .success else {
+            return nil
+        }
+        return result
     }
 
     // MARK: - Subnet
@@ -96,8 +141,11 @@ final class GPSubnetScanner {
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(ifaddr) }
 
-        var own: UInt32 = 0
-        var mask: UInt32 = 0
+        // Consider every IPv4 entry on en0 and prefer a private,
+        // non-link-local one: the first entry can be a 169.254.x.x
+        // link-local address (DHCP failure), which would sweep the
+        // wrong subnet and silently find nothing.
+        var best: (addr: UInt32, mask: UInt32)?
         var cursor: UnsafeMutablePointer<ifaddrs>? = first
         while let current = cursor {
             cursor = current.pointee.ifa_next
@@ -107,36 +155,45 @@ final class GPSubnetScanner {
                   String(cString: interface.ifa_name) == "en0" else {
                 continue
             }
-            own = UInt32(bigEndian: addrPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+            let addr = UInt32(bigEndian: addrPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
                 $0.pointee.sin_addr.s_addr
             })
+            var mask: UInt32 = 0
             if let maskPtr = interface.ifa_netmask {
                 mask = UInt32(bigEndian: maskPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
                     $0.pointee.sin_addr.s_addr
                 })
             }
-            break
+            if best == nil || (isLinkLocal(best!.addr) && !isLinkLocal(addr)) {
+                best = (addr, mask)
+            }
         }
-        guard own != 0 else { return nil }
+        guard let chosen = best, chosen.addr != 0 else { return nil }
+        var mask = chosen.mask
         if mask == 0 {
             mask = 0xFFFFFF00
         }
+        // Assumes a contiguous netmask (universal on home networks).
         // Narrower-or-equal wins: a /25 stays /25, a /16 is capped to
         // the /24 around the phone.
         let effectiveMask = max(mask, 0xFFFFFF00)
-        let network = own & effectiveMask
+        let network = chosen.addr & effectiveMask
         let broadcast = network | ~effectiveMask
-        guard broadcast - network >= 2, broadcast - network <= 256 else { return nil }
+        guard broadcast - network >= 2 else { return nil }
 
         var result: [String] = []
         var candidate = network + 1
         while candidate < broadcast {
-            if candidate != own {
+            if candidate != chosen.addr {
                 result.append(ipString(candidate))
             }
             candidate += 1
         }
         return result
+    }
+
+    private static func isLinkLocal(_ addr: UInt32) -> Bool {
+        return (addr & 0xFFFF0000) == 0xA9FE0000 // 169.254.0.0/16
     }
 
     private static func ipString(_ value: UInt32) -> String {
@@ -152,9 +209,11 @@ final class GPSubnetScanner {
         guard fd >= 0 else { return false }
         defer { close(fd) }
 
-        var flags = fcntl(fd, F_GETFL, 0)
-        flags |= O_NONBLOCK
-        _ = fcntl(fd, F_SETFL, flags)
+        // If making the socket non-blocking fails, bail out: a failed
+        // F_SETFL would silently turn the probe into a blocking
+        // connect with no timeout bound at all.
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return false }
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -170,12 +229,21 @@ final class GPSubnetScanner {
         if connectResult == 0 {
             return true
         }
+        // errno is only meaningful read immediately after the call.
         guard errno == EINPROGRESS else { return false }
 
         var pfd = pollfd()
         pfd.fd = fd
         pfd.events = Int16(POLLOUT)
-        let ready = poll(&pfd, 1, probeTimeoutMs)
+        var ready: Int32 = -1
+        var attempts = 0
+        while ready < 0 && attempts < 3 {
+            ready = poll(&pfd, 1, probeTimeoutMs)
+            if ready < 0 && errno != EINTR {
+                break // A real poll error, not an interruption.
+            }
+            attempts += 1
+        }
         guard ready > 0, pfd.revents & Int16(POLLOUT) != 0 else { return false }
 
         var error: Int32 = 0

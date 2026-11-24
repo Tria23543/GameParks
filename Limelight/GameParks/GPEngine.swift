@@ -18,13 +18,25 @@ final class GPEngine: NSObject {
     // UI callbacks (always invoked on the main queue)
     var onHostsChanged: (() -> Void)?
     var onAppListChanged: (() -> Void)?
+    var onPairingStarted: ((String) -> Void)?
     var onPairingPIN: ((String) -> Void)?
     var onPairingResult: ((Bool, String?) -> Void)?
 
     private(set) var hosts: [TemporaryHost] = []
     var selectedHost: TemporaryHost?
 
-    private var dataManager: DataManager { return DataManager() }
+    // One shared DataManager. Creating one per access is wasteful, and
+    // its initialiser synchronises with the main queue when built on a
+    // background thread — a hidden sync wait on hot paths.
+    private var dataManagerInstance: DataManager?
+    private var dataManager: DataManager {
+        if let instance = dataManagerInstance {
+            return instance
+        }
+        let instance = DataManager()
+        dataManagerInstance = instance
+        return instance
+    }
     private var discoveryManager: DiscoveryManager?
     private let subnetScanner = GPSubnetScanner()
     private var scanInProgress = false
@@ -35,14 +47,33 @@ final class GPEngine: NSObject {
     private var started = false
     private var lastPingSamples: [String: [Int]] = [:]
 
+    // Pairing state. Pairing callbacks apply to pairingHost — never to
+    // whatever host happens to be selected by the time the user has
+    // typed the PIN. pairingSuppressed records that the user dismissed
+    // the pairing UI: state still updates, dialogs stay down.
+    private var pairingHost: TemporaryHost?
+    private var pairingSuppressed = false
+    private let pairingStateLock = NSLock()
+
+    // Notification coalescing: the last published host-list signature.
+    // .gpHostsChanged is posted only when this actually changes.
+    private var lastHostsSignature: String?
+
+    // App-list fetch coalescing, keyed by host uuid (main queue only).
+    private var appListInFlight: Set<String> = []
+    private var appListPending: Set<String> = []
+
     // Active stream tracking for stats
     private var activeStreamAppKey: String?
     private var activeStreamStart: Date?
+    private var activeStreamAccumulated: TimeInterval = 0
     private var activeStreamBitrateKbps: Int = 20000
     private weak var activeStreamVC: UIViewController?
 
     private override init() {
         super.init()
+        // Pairing operations must never run concurrently with each other.
+        opQueue.maxConcurrentOperationCount = 1
     }
 
     // MARK: - Lifecycle
@@ -51,7 +82,6 @@ final class GPEngine: NSObject {
         guard !started else {
             return
         }
-        started = true
 
         CryptoManager.generateKeyPairUsingSSL()
         clientCert = CryptoManager.readCertFromFile()
@@ -70,12 +100,19 @@ final class GPEngine: NSObject {
                                                name: UIApplication.didBecomeActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
                                                name: UIApplication.willResignActiveNotification, object: nil)
+        // Only mark started once setup has actually run, so a failure
+        // above cannot wedge the engine in a half-started state.
+        started = true
     }
 
     @objc private func appDidBecomeActive() {
         discoveryManager?.resetDiscoveryState()
         discoveryManager?.startDiscovery()
         scanLocalNetwork()
+        // Resume the clock on a stream that was backgrounded mid-session.
+        if activeStreamAppKey != nil, activeStreamStart == nil, activeStreamVC != nil {
+            activeStreamStart = Date()
+        }
         if let host = selectedHost, host.state == .online, host.pairState == .paired {
             refreshAppList(host)
         }
@@ -83,6 +120,13 @@ final class GPEngine: NSObject {
 
     @objc private func appWillResignActive() {
         discoveryManager?.stopDiscovery()
+        subnetScanner.cancel()
+        // Pause the stream clock while backgrounded so Stats does not
+        // count time the stream was suspended.
+        if let start = activeStreamStart {
+            activeStreamAccumulated += Date().timeIntervalSince(start)
+            activeStreamStart = nil
+        }
     }
 
     // MARK: - Settings
@@ -107,7 +151,7 @@ final class GPEngine: NSObject {
                                  audioOnPC: current?.playAudioOnPC ?? false,
                                  preferredCodec: 0, // CODEC_PREF_AUTO — never forced
                                  useFramePacing: current?.useFramePacing ?? false,
-                                 enableHdr: false,
+                                 enableHdr: current?.enableHdr ?? false,
                                  btMouseSupport: current?.btMouseSupport ?? false,
                                  absoluteTouchMode: current?.absoluteTouchMode ?? false,
                                  statsOverlay: true)
@@ -147,7 +191,9 @@ final class GPEngine: NSObject {
         guard let settings = dataManager.getSettings() else {
             return 0
         }
-        return (settings.value(forKey: "preferredCodec") as? NSNumber)?.intValue ?? 0
+        // Typed property (see TemporarySettings.h): a rename or type
+        // change here is a compile error, not a silent "Auto".
+        return Int(settings.preferredCodec)
     }
 
     // MARK: - Host helpers
@@ -171,23 +217,50 @@ final class GPEngine: NSObject {
         return sortedApps(for: host).first { $0.id == currentGame }
     }
 
+    /// The running app without the hidden-app filter sortedApps applies:
+    /// a hidden game still blocks a new launch, so the connecting
+    /// screen's "another game is running" check must see it too.
+    func anyRunningApp(for host: TemporaryHost) -> TemporaryApp? {
+        guard let currentGame = host.currentGame, !currentGame.isEmpty, currentGame != "0" else {
+            return nil
+        }
+        return host.appList.compactMap { $0 as? TemporaryApp }.first { $0.id == currentGame }
+    }
+
     // MARK: - Host selection, pairing, app list
 
     /// The main entry when a host is chosen: wake it if asleep, pair if
     /// needed, then load its games.
     func activateHost(_ host: TemporaryHost, userInitiated: Bool) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.activateHost(host, userInitiated: userInitiated)
+            }
+            return
+        }
         selectedHost = host
         if host.state == .offline {
             if userInitiated {
                 wake(host)
+                // Re-probe once, shortly after the wake request, so the
+                // screens catch up when the PC boots instead of the
+                // user having to tap again.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                    guard let self = self, host.state == .offline,
+                          self.hosts.contains(where: { $0.uuid == host.uuid }) else { return }
+                    self.fetchServerInfo(host) { ok in
+                        if ok {
+                            host.state = .online
+                        }
+                        self.notifyHostsChanged()
+                    }
+                }
             }
             notifyHostsChanged()
             return
         }
-        if host.state == .unknown {
-            notifyHostsChanged()
-            return
-        }
+        // .online and .unknown both probe: an unknown host must never be
+        // a dead end — tapping it retries the connection.
         fetchServerInfo(host) { [weak self] ok in
             guard let self = self else { return }
             if !ok {
@@ -237,23 +310,125 @@ final class GPEngine: NSObject {
         }
     }
 
+    /// Sets up pairing for a host. EVERYTHING here runs on a background
+    /// queue — this is the fix for the v1.1 pairing freeze:
+    /// stopDiscoveryBlocking waits for every discovery worker to drain,
+    /// a worker can be blocked inside DataManager (whose Core Data
+    /// context lives on the main queue), so calling it ON the main
+    /// queue — as this did, via fetchServerInfo's main-queue completion
+    /// — deadlocks the app permanently. The engine's own front-end
+    /// calls it from a background queue for the same reason.
     private func pair(_ host: TemporaryHost) {
-        guard let cert = clientCert else {
-            onPairingResult?(false, "Pairing is not ready yet — try again in a moment.")
+        pairingStateLock.lock()
+        guard pairingHost == nil else {
+            // A pairing is already in flight; re-entrant taps (the host
+            // row, Play, repeated activateHost calls) must not enqueue
+            // competing PairManagers against the same server.
+            pairingStateLock.unlock()
             return
         }
-        // Polling the server while pairing causes the server to screw up,
-        // so discovery stops completely first (same as the engine's own flow).
-        discoveryManager?.stopDiscoveryBlocking()
-        guard let hMan = HttpManager(host: host),
-              let pairManager = PairManager(manager: hMan, clientCert: cert, callback: self) else {
-            onPairingResult?(false, "Pairing is not ready yet — try again in a moment.")
-            return
+        pairingHost = host
+        pairingSuppressed = false
+        pairingStateLock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onPairingStarted?(host.name)
         }
-        opQueue.addOperation(pairManager)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            if self.clientCert == nil {
+                // The certificate may not have existed when start() ran;
+                // pairing must not dead-end on that — retry once here.
+                CryptoManager.generateKeyPairUsingSSL()
+                self.clientCert = CryptoManager.readCertFromFile()
+            }
+            guard let cert = self.clientCert else {
+                self.finishPairingWithFailure(host, message: "Pairing is not ready yet — try again in a moment.")
+                return
+            }
+            // Polling the server during pairing corrupts the pairing
+            // handshake, so discovery stops completely first (same as
+            // the engine's own flow). This blocks until the discovery
+            // workers drain — safe here, fatal on the main queue.
+            self.discoveryManager?.stopDiscoveryBlocking()
+            guard let hMan = HttpManager(host: host),
+                  let pairManager = PairManager(manager: hMan, clientCert: cert, callback: self) else {
+                self.discoveryManager?.startDiscovery()
+                self.finishPairingWithFailure(host, message: "Could not reach \(host.name) to start pairing. Check it is online, then try again.")
+                return
+            }
+            self.opQueue.addOperation(pairManager)
+        }
+    }
+
+    /// The user dismissed the pairing UI. Queued pairing work is
+    /// cancelled and discovery resumes. If the server-side attempt
+    /// still completes afterwards, the next discovery poll corrects
+    /// the host's pair state, so nothing is left inconsistent.
+    func cancelPairing() {
+        pairingStateLock.lock()
+        pairingSuppressed = true
+        pairingHost = nil
+        pairingStateLock.unlock()
+        opQueue.cancelAllOperations()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.discoveryManager?.startDiscovery()
+        }
+    }
+
+    private func finishPairingWithFailure(_ host: TemporaryHost, message: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.pairingStateLock.lock()
+            let suppressed = self.pairingSuppressed
+            if self.pairingHost?.uuid == host.uuid {
+                self.pairingHost = nil
+                self.pairingSuppressed = false
+            }
+            self.pairingStateLock.unlock()
+            if !suppressed {
+                self.onPairingResult?(false, message)
+            }
+        }
+    }
+
+    /// Atomically takes the pairing state for a completion callback:
+    /// the host the result belongs to, and whether the UI was dismissed.
+    private func claimPairingCompletion() -> (host: TemporaryHost?, suppressed: Bool) {
+        pairingStateLock.lock()
+        defer { pairingStateLock.unlock() }
+        let host = pairingHost
+        let suppressed = pairingSuppressed
+        pairingHost = nil
+        pairingSuppressed = false
+        return (host, suppressed)
+    }
+
+    private func isPairingUIActive() -> Bool {
+        pairingStateLock.lock()
+        defer { pairingStateLock.unlock() }
+        return pairingHost != nil && !pairingSuppressed
     }
 
     func refreshAppList(_ host: TemporaryHost) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshAppList(host)
+            }
+            return
+        }
+        // Coalesce: this is called from at least six places, and
+        // overlapping fetches unpause discovery for each other (the
+        // pause exists so polling cannot corrupt the fetch) and race
+        // to write host.appList. One fetch per host at a time; a call
+        // that arrives mid-fetch schedules exactly one follow-up.
+        let uuid = host.uuid
+        if appListInFlight.contains(uuid) {
+            appListPending.insert(uuid)
+            return
+        }
+        appListInFlight.insert(uuid)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.discoveryManager?.pauseDiscovery(for: host)
             let response = ConnectionHelper.getAppList(for: host)
@@ -261,13 +436,20 @@ final class GPEngine: NSObject {
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                self.appListInFlight.remove(uuid)
                 if let response = response, response.isStatusOk(), let appList = response.getAppList() {
                     host.appList = appList
                     self.dataManager.updateApps(forExisting: host)
                     NotificationCenter.default.post(name: .gpAppListChanged, object: nil)
                     self.onAppListChanged?()
                 }
+                // On failure the previous list stays on screen (it is
+                // refreshed again on the next trigger); there is no
+                // error surface for it in the approved design.
                 self.notifyHostsChanged()
+                if self.appListPending.remove(uuid) != nil {
+                    self.refreshAppList(host)
+                }
             }
         }
     }
@@ -279,26 +461,38 @@ final class GPEngine: NSObject {
     }
 
     func addHost(address: String, completion: @escaping (Bool, String?) -> Void) {
-        discoveryManager?.discoverHost(address) { [weak self] host, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if let host = host {
-                    self.dataManager.update(host)
-                    if !self.hosts.contains(where: { $0.uuid == host.uuid }) {
-                        self.hosts.append(host)
-                        self.hosts.sort { $0.compareName($1) == .orderedAscending }
+        // discoverHost performs synchronous HTTP (plus a possible STUN
+        // lookup): it must never run on the caller's queue — the
+        // add-by-address dialog calls this from the main queue, where a
+        // silent host would freeze the app.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.discoveryManager?.discoverHost(address) { [weak self] host, error in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if let host = host {
+                        self.dataManager.update(host)
+                        if !self.hosts.contains(where: { $0.uuid == host.uuid }) {
+                            self.hosts.append(host)
+                            self.hosts.sort { $0.compareName($1) == .orderedAscending }
+                        }
+                        self.selectedHost = host
+                        self.notifyHostsChanged()
+                        completion(true, nil)
+                    } else {
+                        completion(false, error)
                     }
-                    self.selectedHost = host
-                    self.notifyHostsChanged()
-                    completion(true, nil)
-                } else {
-                    completion(false, error)
                 }
             }
         }
     }
 
     func removeHost(_ host: TemporaryHost) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.removeHost(host)
+            }
+            return
+        }
         discoveryManager?.removeHost(fromDiscovery: host)
         dataManager.remove(host)
         hosts.removeAll { $0.uuid == host.uuid }
@@ -342,9 +536,17 @@ final class GPEngine: NSObject {
             DispatchQueue.main.async {
                 self?.adoptDiscoveredHost(host)
             }
-        }, completion: { [weak self] in
-            self?.scanInProgress = false
-            self?.finishScan()
+        }, completion: { [weak self] completedNormally in
+            guard let self = self else { return }
+            self.scanInProgress = false
+            if !completedNormally {
+                // A cancelled or network-less sweep must not throttle
+                // the next attempt for the full 20 s.
+                self.lastScanStarted = nil
+            }
+            // One batched publish for everything the sweep changed.
+            self.notifyHostsChanged()
+            self.finishScan()
         })
     }
 
@@ -361,23 +563,32 @@ final class GPEngine: NSObject {
     /// hosts) and tell the screens, exactly like a manual add.
     private func adoptDiscoveredHost(_ host: TemporaryHost) {
         dataManager.update(host)
-        if !hosts.contains(where: { $0.uuid == host.uuid }) {
+        let isNew = !hosts.contains(where: { $0.uuid == host.uuid })
+        if isNew {
             hosts.append(host)
             hosts.sort { $0.compareName($1) == .orderedAscending }
         }
         if selectedHost == nil {
             selectedHost = host
         }
-        notifyHostsChanged()
+        // During a sweep, updates to already-known hosts are batched
+        // into the single publish at scan end; a genuinely new host
+        // publishes immediately so it appears as soon as it is found.
+        if isNew || !scanInProgress {
+            notifyHostsChanged()
+        }
         if host.pairState == .paired {
             refreshAppList(host)
         }
     }
 
-    func quitCurrentApp(on host: TemporaryHost, completion: @escaping () -> Void) {
+    /// Quits the running app on the host. The completion reports
+    /// whether the host actually quit it — callers must not proceed
+    /// with a launch on failure (the host is still busy).
+    func quitCurrentApp(on host: TemporaryHost, completion: @escaping (Bool) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let hMan = HttpManager(host: host) else {
-                DispatchQueue.main.async { completion() }
+                DispatchQueue.main.async { completion(false) }
                 return
             }
             let response = HttpResponse()
@@ -385,9 +596,12 @@ final class GPEngine: NSObject {
             self?.discoveryManager?.pauseDiscovery(for: host)
             hMan.executeRequestSynchronously(request)
             self?.discoveryManager?.resumeDiscovery(for: host)
+            let ok = response.isStatusOk()
             DispatchQueue.main.async {
-                host.currentGame = nil
-                completion()
+                if ok {
+                    host.currentGame = nil
+                }
+                completion(ok)
             }
         }
     }
@@ -401,18 +615,24 @@ final class GPEngine: NSObject {
         guard let host = app.host, host.pairState == .paired else {
             return nil
         }
-        let config = GPStreamConfigBuilder.config(for: app)
+        guard let config = GPStreamConfigBuilder.config(for: app) else {
+            return nil
+        }
         return GPStreamLauncher.streamViewController(withConfig: config)
     }
 
     /// Records the start of a stream so its session lands in Stats
     /// when the stream view leaves the screen.
     func registerStreamStart(app: TemporaryApp, viewController: UIViewController) {
+        // A previous session that was never closed out is recorded
+        // now rather than silently dropped.
+        endStreamSessionIfNeeded()
         guard let host = app.host else {
             return
         }
         activeStreamAppKey = GPStats.appKey(host: host, app: app)
         activeStreamStart = Date()
+        activeStreamAccumulated = 0
         activeStreamBitrateKbps = dataManager.getSettings()?.bitrate?.intValue ?? 20000
         activeStreamVC = viewController
     }
@@ -420,14 +640,33 @@ final class GPEngine: NSObject {
     /// Called by the tab bar controller (as navigation delegate) whenever
     /// the visible screen changes — used to notice a stream has ended.
     func noteVisibleViewController(_ viewController: UIViewController) {
-        guard let streamVC = activeStreamVC, viewController !== streamVC,
-              let start = activeStreamStart, let appKey = activeStreamAppKey else {
-            return
+        guard activeStreamAppKey != nil else { return }
+        if let streamVC = activeStreamVC {
+            // The stream screen is still alive: end the session only
+            // when a different screen is showing AND the stream screen
+            // has actually left the window. A sheet or alert presented
+            // over the stream must not end the session early.
+            guard viewController !== streamVC, streamVC.view.window == nil else { return }
         }
-        let duration = Date().timeIntervalSince(start)
+        // activeStreamVC is nil here when the stream screen was
+        // dismissed and deallocated without a final navigation event —
+        // the session still gets recorded.
+        endStreamSessionIfNeeded()
+    }
+
+    private func endStreamSessionIfNeeded() {
+        guard let appKey = activeStreamAppKey else { return }
+        var duration = activeStreamAccumulated
+        if let start = activeStreamStart {
+            duration += Date().timeIntervalSince(start)
+        }
+        // Sanity cap: a stream left "current" across days must not
+        // record days of playtime.
+        duration = min(duration, 12 * 3600)
         GPStats.shared.recordSession(appKey: appKey, duration: duration, bitrateKbps: activeStreamBitrateKbps)
         activeStreamVC = nil
         activeStreamStart = nil
+        activeStreamAccumulated = 0
         activeStreamAppKey = nil
         if let host = selectedHost, host.pairState == .paired {
             refreshAppList(host)
@@ -442,16 +681,39 @@ final class GPEngine: NSObject {
 
     // MARK: - Notifications
 
-    private func notifyHostsChanged() {
-        if Thread.isMainThread {
-            NotificationCenter.default.post(name: .gpHostsChanged, object: nil)
-            onHostsChanged?()
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                NotificationCenter.default.post(name: .gpHostsChanged, object: nil)
-                self?.onHostsChanged?()
-            }
+    /// A fingerprint of everything the screens render from the host
+    /// list. Compared before every publish (see notifyHostsChanged).
+    private func hostsSignature() -> String {
+        var parts = hosts.map { host in
+            [host.uuid, host.name, "\(host.state.rawValue)", "\(host.pairState.rawValue)",
+             host.activeAddress ?? "", "\(host.appList.count)", host.currentGame ?? ""].joined(separator: "|")
         }
+        parts.append("sel:" + (selectedHost?.uuid ?? ""))
+        if let selected = selectedHost, let ping = ping(for: selected) {
+            parts.append("ping:\(ping)")
+        }
+        return parts.joined(separator: ";")
+    }
+
+    /// Publishes a host-list change — but only when something the
+    /// screens render actually changed. Discovery polls, rescans and
+    /// refreshes used to post unconditionally, and every post rebuilt
+    /// every visible screen from scratch: in-flight touches on the PC
+    /// card were destroyed mid-tap (the v1.1 "tap does nothing" bug)
+    /// and the whole app stuttered. Duplicates now die here, at the
+    /// source; screens additionally guard their own rebuilds.
+    private func notifyHostsChanged() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.notifyHostsChanged()
+            }
+            return
+        }
+        let signature = hostsSignature()
+        guard signature != lastHostsSignature else { return }
+        lastHostsSignature = signature
+        NotificationCenter.default.post(name: .gpHostsChanged, object: nil)
+        onHostsChanged?()
     }
 }
 
@@ -464,7 +726,9 @@ extension Notification.Name {
 
 extension GPEngine: DiscoveryCallback {
     func updateAllHosts(_ hosts: [Any]) {
-        let discovered = (hosts as? [TemporaryHost] ?? []).sorted { $0.compareName($1) == .orderedAscending }
+        // compactMap, not an all-or-nothing cast: one unexpected
+        // element must not silently wipe the whole host list.
+        let discovered = hosts.compactMap { $0 as? TemporaryHost }.sorted { $0.compareName($1) == .orderedAscending }
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.hosts = discovered
@@ -492,36 +756,62 @@ extension GPEngine: DiscoveryCallback {
 extension GPEngine: PairCallback {
     func startPairing(_ pin: String) {
         DispatchQueue.main.async { [weak self] in
-            self?.onPairingPIN?(pin)
+            // If the user already dismissed the pairing UI, a late PIN
+            // must not pop a dialog back up.
+            guard let self = self, self.isPairingUIActive() else { return }
+            self.onPairingPIN?(pin)
         }
     }
 
     func pairSuccessful(_ serverCert: Data) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.selectedHost?.serverCert = serverCert
+            // The result belongs to the host pairing was started for —
+            // not to whatever is selected now — and state is mutated,
+            // persisted and published BEFORE the result callback, so
+            // anything reacting to it reads the paired state.
+            let (pairedHost, suppressed) = self.claimPairingCompletion()
             self.discoveryManager?.startDiscovery()
-            self.onPairingResult?(true, nil)
-            if let host = self.selectedHost {
+            if let host = pairedHost ?? self.selectedHost {
+                host.serverCert = serverCert
                 host.pairState = .paired
+                self.dataManager.update(host)
                 self.refreshAppList(host)
             }
             self.notifyHostsChanged()
+            if !suppressed {
+                self.onPairingResult?(true, nil)
+            }
         }
     }
 
     func pairFailed(_ message: String) {
         DispatchQueue.main.async { [weak self] in
-            self?.discoveryManager?.startDiscovery()
-            self?.onPairingResult?(false, message)
+            guard let self = self else { return }
+            let (_, suppressed) = self.claimPairingCompletion()
+            self.discoveryManager?.startDiscovery()
+            self.notifyHostsChanged()
+            if !suppressed {
+                self.onPairingResult?(false, message)
+            }
         }
     }
 
     func alreadyPaired() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            if let host = self.selectedHost {
+            // The host IS paired: say so in state and to the UI,
+            // exactly like a fresh success — a screen waiting on the
+            // pairing result must not wait forever.
+            let (pairedHost, suppressed) = self.claimPairingCompletion()
+            if let host = pairedHost ?? self.selectedHost {
+                host.pairState = .paired
+                self.dataManager.update(host)
                 self.refreshAppList(host)
+            }
+            self.notifyHostsChanged()
+            if !suppressed {
+                self.onPairingResult?(true, nil)
             }
         }
     }
