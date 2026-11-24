@@ -17,7 +17,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface GPStreamConfigBuilder : NSObject
 
-+ (StreamConfiguration*) configForApp:(TemporaryApp*)app;
+/// Builds the configuration, or returns nil when the app has no
+/// host or no saved settings exist — the one deliberate divergence
+/// from the engine's reference implementation, which would build a
+/// zeroed configuration in those cases instead of failing cleanly.
++ (nullable StreamConfiguration*) configForApp:(TemporaryApp*)app;
 
 @end
 

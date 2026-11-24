@@ -9,6 +9,9 @@
 @implementation GPBootstrap
 
 + (void) installInWindow:(UIWindow*)window {
+    if (window == nil) {
+        return;
+    }
     GPTabBarController* tabBarController = [[GPTabBarController alloc] init];
     UINavigationController* navController = [[UINavigationController alloc] initWithRootViewController:tabBarController];
     [navController setNavigationBarHidden:YES animated:NO];

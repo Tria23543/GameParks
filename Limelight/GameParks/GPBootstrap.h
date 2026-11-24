@@ -15,6 +15,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Installs the GameParks tab-bar UI as the window's root view controller,
 /// wrapped in the navigation controller the stream view expects to pop back to.
+/// Contract: called exactly once, from the app delegate's
+/// didFinishLaunchingWithOptions. The navigation controller's delegate is
+/// the tab bar controller — GPEngine's stream-end detection depends on
+/// that assignment, so it must not be moved or dropped.
 + (void) installInWindow:(UIWindow*)window;
 
 @end

@@ -20,8 +20,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Instantiates the stream view controller from the iPhone/iPad
 /// storyboard, attaches the configuration, and returns it ready to
-/// be pushed. Returns nil if the storyboard scene is not the
-/// engine's stream view controller.
+/// install. Returns nil for an unusable configuration (nil config,
+/// nil host, zero dimensions) or when the storyboard scene is not
+/// the engine's stream view controller.
 + (nullable UIViewController*) streamViewControllerWithConfig:(StreamConfiguration*)config;
 
 @end

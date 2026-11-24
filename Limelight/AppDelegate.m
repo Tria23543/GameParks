@@ -54,8 +54,15 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 // its mask. Without this, the Info.plist value rules every screen.
 - (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
     UIViewController* vc = window.rootViewController;
+    // Walk the presented chain, but never resolve to an alert: an
+    // alert's own mask (all orientations) would briefly unlock
+    // rotation for the screen underneath it.
     while (vc.presentedViewController != nil) {
-        vc = vc.presentedViewController;
+        UIViewController* presented = vc.presentedViewController;
+        if ([presented isKindOfClass:[UIAlertController class]]) {
+            break;
+        }
+        vc = presented;
     }
     if ([vc isKindOfClass:[UINavigationController class]]) {
         vc = [(UINavigationController*)vc topViewController];
