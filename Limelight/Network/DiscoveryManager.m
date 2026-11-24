@@ -311,14 +311,31 @@
     }
 }
 
+// GP v2.6 (B-06): worker matching is by UUID, the same identity
+// TemporaryHost itself uses (isEqual:/hash are UUID-based, and
+// getHostInDiscovery: below already matches by UUID). The old
+// pointer test silently missed for a divergent instance of the
+// same host: remove/pause left the worker running, and a surviving
+// worker's discoverHost re-saves its host to Core Data — a removed
+// host came back. Pointer equality is kept as a fast path for the
+// common same-instance case (and for UUID-less hosts).
+- (BOOL) worker:(DiscoveryWorker *)worker matchesHost:(TemporaryHost *)host {
+    TemporaryHost *workerHost = [worker getHost];
+    if (workerHost == host) {
+        return YES;
+    }
+    return workerHost.uuid.length > 0 && host.uuid.length > 0
+        && [workerHost.uuid isEqualToString:host.uuid];
+}
+
 - (void) removeHostFromDiscovery:(TemporaryHost *)host {
     @synchronized (_hostQueue) {
         for (DiscoveryWorker* worker in [_opQueue operations]) {
-            if ([worker getHost] == host) {
+            if ([self worker:worker matchesHost:host]) {
                 [worker cancel];
             }
         }
-        
+
         [_hostQueue removeObject:host];
         [_pausedHosts removeObject:host];
     }
@@ -328,11 +345,11 @@
     @synchronized (_hostQueue) {
         // Stop any worker for the host
         for (DiscoveryWorker* worker in [_opQueue operations]) {
-            if ([worker getHost] == host) {
+            if ([self worker:worker matchesHost:host]) {
                 [worker cancel];
             }
         }
-        
+
         // Add it to the paused hosts list
         [_pausedHosts addObject:host];
     }
@@ -342,10 +359,14 @@
     @synchronized (_hostQueue) {
         // Remove it from the paused hosts list
         [_pausedHosts removeObject:host];
-        
-        // Start discovery again
+
+        // Start discovery again. GP v2.6 (B-06): poll the queue's
+        // own instance for this UUID when there is one, so the new
+        // worker updates the host object the queue (and database
+        // saves) actually track, not a divergent copy.
         if (shouldDiscover) {
-            [_opQueue addOperation:[self createWorkerForHost:host]];
+            TemporaryHost *queuedHost = [self getHostInDiscovery:host.uuid] ?: host;
+            [_opQueue addOperation:[self createWorkerForHost:queuedHost]];
         }
     }
 }
