@@ -59,7 +59,7 @@ extern NSString * const GPHostInfoErrorMessageKey;
 /// holds; on teardown it restores the previous callbacks ONLY if
 /// the token is still its own — otherwise a newer owner has taken
 /// the slots over and must not be clobbered by a stale restore.
-@property (nonatomic, strong, nullable) id pairingCallbackOwner;
+@property (nonatomic, strong, nullable) NSObject *pairingCallbackOwner;
 
 /// One-time setup: crypto, saved hosts, discovery, subnet scan.
 /// Mirrors MainFrameViewController's viewDidLoad.

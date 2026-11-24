@@ -33,6 +33,7 @@ final class GPConnectingViewController: GPBaseViewController {
     }
 
     private let hostUUID: String
+    private let hostName: String
     private var host: TemporaryHost
     private let app: TemporaryApp
 
@@ -50,11 +51,16 @@ final class GPConnectingViewController: GPBaseViewController {
     private var waitOnOnline: (() -> Void)?
     private var waitOnTimeout: (() -> Void)?
     private var lastActivation: Date?
+    // B-26: each wait gets its own token, bumped when the wait is
+    // installed or cleared — a poll chain from a superseded wait
+    // can no longer re-arm against its successor's closures.
+    private var waitToken = 0
 
     init(host: TemporaryHost, app: TemporaryApp) {
         self.host = host
         self.app = app
         self.hostUUID = host.uuid ?? ""
+        self.hostName = host.name ?? ""
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -72,9 +78,12 @@ final class GPConnectingViewController: GPBaseViewController {
             showsBack: true))
 
         let settings = DataManager().getSettings()
-        let streamSummary = settings != nil
-            ? "\(settings!.height?.intValue ?? 1080)p\(settings!.framerate?.intValue ?? 60)"
-            : "1080p60"
+        // B-41 (mirrored from GPGame): the height goes through the
+        // same label mapping Stream settings uses — 2160 is "4K",
+        // not "2160p".
+        let settingsHeight = settings?.height?.intValue ?? 1080
+        let settingsFps = settings?.framerate?.intValue ?? 60
+        let streamSummary = "\(settingsHeight == 2160 ? "4K" : "\(settingsHeight)p")\(settingsFps)"
         let stepTitles = [
             "Waking \(host.name ?? "your PC")",
             GPSessionController.shared().runningApp(for: host)?.id == app.id ? "Resuming the game" : "Starting the game",
@@ -269,6 +278,9 @@ final class GPConnectingViewController: GPBaseViewController {
         waitDeadline = nil
         waitOnOnline = nil
         waitOnTimeout = nil
+        // B-26: retire any poll chain still carrying this wait's
+        // token, so it cannot re-arm against the next wait.
+        waitToken += 1
     }
 
     /// Waits until the freshly re-resolved host reports .online.
@@ -279,21 +291,27 @@ final class GPConnectingViewController: GPBaseViewController {
                                onOnline: @escaping () -> Void,
                                onTimeout: @escaping () -> Void) {
         let generation = runGeneration
+        waitToken += 1
+        let token = waitToken
         waitDeadline = Date().addingTimeInterval(timeout)
         waitOnOnline = onOnline
         waitOnTimeout = onTimeout
         lastActivation = nil
-        scheduleWaitPoll(generation: generation)
+        scheduleWaitPoll(generation: generation, token: token)
         checkWait()
     }
 
-    private func scheduleWaitPoll(generation: Int) {
+    private func scheduleWaitPoll(generation: Int, token: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            // B-26: the token check is what retires this chain when
+            // checkWait's synchronous online callback installs the
+            // NEXT step's wait under the same run generation — the
+            // old chain must not re-arm against the new wait.
             guard let self = self, !self.cancelled, generation == self.runGeneration,
-                  self.waitOnOnline != nil else { return }
+                  token == self.waitToken, self.waitOnOnline != nil else { return }
             self.checkWait()
-            if self.waitOnOnline != nil {
-                self.scheduleWaitPoll(generation: generation)
+            if self.waitOnOnline != nil, token == self.waitToken {
+                self.scheduleWaitPoll(generation: generation, token: token)
             }
         }
     }
@@ -425,7 +443,15 @@ final class GPConnectingViewController: GPBaseViewController {
     }
 
     private func refreshHost() {
-        if let current = GPSessionController.shared().hosts.first(where: { $0.uuid == hostUUID }) {
+        // B-35: the A-77 fallback GPGame/GPHost already have — a
+        // non-empty UUID matches by UUID; an empty UUID falls back
+        // to the name captured at init. UUID-only matching made
+        // this a permanent no-op for an empty UUID (and froze it
+        // the same way if the server ever rewrote the UUID), so
+        // the whole launch ran on a stale host object.
+        let hosts = GPSessionController.shared().hosts
+        if let current = hosts.first(where: { $0.uuid == hostUUID && !hostUUID.isEmpty })
+            ?? (hostUUID.isEmpty ? hosts.first(where: { $0.name == hostName }) : nil) {
             host = current
         }
     }
