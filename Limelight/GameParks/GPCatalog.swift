@@ -64,33 +64,70 @@ enum GPCatalog {
 
         // --- Your classics (her own setup installs) ---
 
-        if hasPhrase("vice city") {
+        // GP v2.6 (B-22): Vice City Stories is a different game —
+        // it must not fall into the Vice City rule below; it falls
+        // through to the generic GTA branch (no bundled cover).
+        if hasPhrase("vice city") && !hasPhrase("vice city stories") {
             return GPGameInfo(coverImageName: "cover_vicecity", isClassic: true,
                               sourceTag: "Your setup", detailLine: "Open world · Rockstar Games")
         }
-        // Core Design era (1996 original through Angel of Darkness).
-        if norm == "tomb raider" || hasPhrase("tomb raider ii") || hasPhrase("tomb raider iii")
+        // GP v2.6 (A-08/B-23): cover_tombraider is the true 1996
+        // cover, so it is restricted to name forms that can only be
+        // the 1996 game. Every other classic Tomb Raider keeps its
+        // classic flag, tag and developer credit but gets NO bundled
+        // cover — the 1996 art on Legend/Anniversary/Underworld was
+        // the exact defect A-08 cited. The plain name "Tomb Raider"
+        // is ambiguous (the 2013 game carries it too), so it also
+        // gets no bundled cover and no developer credit: host art
+        // (priority 1) decides what it looks like.
+        if norm == "tomb raider 1" || norm == "tomb raider i" || norm == "tomb raider 1996" {
+            return GPGameInfo(coverImageName: "cover_tombraider", isClassic: true,
+                              sourceTag: "Your setup", detailLine: "Adventure · Core Design")
+        }
+        if hasPhrase("tomb raider i iii remastered") || hasPhrase("tomb raider iv vi remastered") {
+            return GPGameInfo(coverImageName: nil, isClassic: true,
+                              sourceTag: "Your setup", detailLine: "Adventure · Core Design")
+        }
+        // Core Design era classics other than the 1996 original.
+        if hasPhrase("tomb raider ii") || hasPhrase("tomb raider iii")
             || hasPhrase("tomb raider the last revelation") || hasPhrase("tomb raider chronicles")
             || hasPhrase("tomb raider the angel of darkness") {
-            return GPGameInfo(coverImageName: "cover_tombraider", isClassic: true,
+            return GPGameInfo(coverImageName: nil, isClassic: true,
                               sourceTag: "Your setup", detailLine: "Adventure · Core Design")
         }
         // Crystal Dynamics era classics.
         if hasPhrase("tomb raider legend") || hasPhrase("tomb raider anniversary")
             || hasPhrase("tomb raider underworld") {
-            return GPGameInfo(coverImageName: "cover_tombraider", isClassic: true,
+            return GPGameInfo(coverImageName: nil, isClassic: true,
                               sourceTag: "Your setup", detailLine: "Adventure · Crystal Dynamics")
         }
+        if norm == "tomb raider" {
+            return GPGameInfo(coverImageName: nil, isClassic: true,
+                              sourceTag: "Your setup", detailLine: "Adventure")
+        }
         // United Offensive is CoD 1's expansion (Gray Matter), so it
-        // shares the first game's cover; CoD 2 does not and falls
-        // through to the coverless generic CoD branch below.
+        // shares the first game's cover; CoD 2 does not — it has its
+        // own coverless classic branch below.
         if hasPhrase("call of duty united offensive") {
             return GPGameInfo(coverImageName: "cover_cod", isClassic: true,
                               sourceTag: "Your setup", detailLine: "WWII shooter · Gray Matter")
         }
-        if norm == "call of duty" {
+        if norm == "call of duty" || norm == "call of duty 1" || hasPhrase("call of duty 2003") {
             return GPGameInfo(coverImageName: "cover_cod", isClassic: true,
                               sourceTag: "Your setup", detailLine: "WWII shooter · Infinity Ward")
+        }
+        // GP v2.6 (B-22): CoD 2 is one of her own setup installs, so
+        // it shelves with the classics — but it has no bundled cover
+        // (A-69: it must not take CoD 1's art).
+        if hasPhrase("call of duty 2") || hasPhrase("call of duty ii") {
+            return GPGameInfo(coverImageName: nil, isClassic: true,
+                              sourceTag: "Your setup", detailLine: "WWII shooter · Infinity Ward")
+        }
+        // GP v2.6 (B-22): Cricket 07 — her own setup install, with
+        // its bundled cover (prepared 600x900 art, cover_cricket07).
+        if hasPhrase("cricket 07") || hasPhrase("cricket 2007") {
+            return GPGameInfo(coverImageName: "cover_cricket07", isClassic: true,
+                              sourceTag: "Your setup", detailLine: "Cricket · EA Sports")
         }
         if hasPhrase("most wanted") && (hasPhrase("need for speed") || hasPhrase("nfs")) {
             // The 2005 cover is earned only by a 2005-era marker in
@@ -117,7 +154,11 @@ enum GPCatalog {
                               sourceTag: "Steam", detailLine: "Open world · Rockstar Games")
         }
         if tokens.starts(with: ["grand", "theft", "auto", "v"]) || tokens.starts(with: ["gta", "v"])
-            || norm == "grand theft auto 5" || norm == "gta5" || norm == "gtav" {
+            || norm == "grand theft auto 5" || norm == "gta5" || norm == "gtav"
+            || tokens == ["gta", "5"] {
+            // GP v2.6 (B-22): tokens == ["gta", "5"] is the spaced
+            // "GTA 5" form; it sits after the GTA IV exclusion above,
+            // so it cannot swallow IV.
             return GPGameInfo(coverImageName: "cover_gta5", isClassic: false,
                               sourceTag: "Steam", detailLine: "Open world · Rockstar Games")
         }
@@ -130,11 +171,17 @@ enum GPCatalog {
                               sourceTag: "Steam", detailLine: "Story-driven · Naughty Dog")
         }
         if hasPhrase("mafia") {
-            // cover_mafia is The Old Country's key art — only that
-            // game may use it; every other Mafia title gets no
-            // bundled cover rather than the wrong game's poster.
+            // GP v2.6 (B-36): there is no bundled Mafia cover any
+            // more. The shipped cover_mafia was a centre-crop of
+            // square Old Country key art that cut the game's own
+            // title in half ("MAFI... / ...E OLD COUNT..."), and no
+            // sound 600x900 source exists in the prepared set — so
+            // per the standing principle the title tile beats
+            // mutilated art, for Old Country and every other Mafia
+            // title alike (A-07's restriction is preserved: no Mafia
+            // title shows another Mafia game's art).
             if hasPhrase("old country") {
-                return GPGameInfo(coverImageName: "cover_mafia", isClassic: false,
+                return GPGameInfo(coverImageName: nil, isClassic: false,
                                   sourceTag: "Steam", detailLine: "Crime saga · Hangar 13")
             }
             if hasPhrase("mafia ii") || hasPhrase("mafia 2") {
@@ -240,13 +287,24 @@ enum GPCatalog {
             (try? FileManager.default.attributesOfItem(atPath: p))?[.modificationDate] as? Date
         }
         if let cached = boxArtCache.object(forKey: key) {
-            if let recorded = boxArtFileDates[key], let current = fileDate, recorded == current {
+            if let recorded = boxArtFileDates[key], let current = fileDate {
+                if recorded == current {
+                    return cached
+                }
+                // The file changed under the cached image: drop the
+                // stale entry and re-decode below.
+                boxArtCache.removeObject(forKey: key)
+                boxArtFileDates.removeValue(forKey: key)
+            } else {
+                // GP v2.6 (B-11): the entry is cached but has no
+                // recorded date, or the file's date cannot be read
+                // right now. Dropping it here looped forever (drop ->
+                // re-decode -> cached dateless -> drop, posting
+                // GPAppListChanged every cycle). Trust it for this
+                // generation; a real mtime change is still caught
+                // above whenever both dates are readable.
                 return cached
             }
-            // The file changed under the cached image (or its date
-            // is unknown): drop the stale entry and re-decode below.
-            boxArtCache.removeObject(forKey: key)
-            boxArtFileDates.removeValue(forKey: key)
         }
         guard let path = path,
               FileManager.default.fileExists(atPath: path),
@@ -257,20 +315,45 @@ enum GPCatalog {
         boxArtDecodeQueue.async {
             var decoded: UIImage?
             var cost = 0
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-               let image = UIImage(data: data) {
-                // Force the decode here, on this queue, by drawing
-                // the image once (the same trick upstream's
-                // loadBoxArtForCaching uses against scroll jank) —
-                // at scale 1, so the cached copy holds the source's
-                // pixels, not a 2–3× screen-scale rendering of them.
-                let format = UIGraphicsImageRendererFormat()
-                format.scale = 1
-                let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
-                decoded = renderer.image { _ in image.draw(at: .zero) }
-                if let decoded = decoded {
-                    cost = Int(decoded.size.width * decoded.size.height * 4)
+            var decodeFailed = false
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)), !data.isEmpty {
+                if let image = UIImage(data: data) {
+                    // GP v2.6 (B-11): an image whose own cost meets
+                    // the whole 48 MB cache limit can never be
+                    // retained by NSCache, which looped the same way
+                    // the dateless entry did. Downscale oversize
+                    // host art before caching (cap ~10 MP, keeping
+                    // the aspect ratio).
+                    var drawSize = image.size
+                    let pixels = drawSize.width * drawSize.height
+                    if pixels > 10_000_000 {
+                        let factor = (10_000_000 / pixels).squareRoot()
+                        drawSize = CGSize(width: (drawSize.width * factor).rounded(),
+                                          height: (drawSize.height * factor).rounded())
+                    }
+                    // Force the decode here, on this queue, by drawing
+                    // the image once (the same trick upstream's
+                    // loadBoxArtForCaching uses against scroll jank) —
+                    // at scale 1, so the cached copy holds the source's
+                    // pixels, not a 2–3× screen-scale rendering of them.
+                    let format = UIGraphicsImageRendererFormat()
+                    format.scale = 1
+                    let renderer = UIGraphicsImageRenderer(size: drawSize, format: format)
+                    decoded = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: drawSize)) }
+                    if let decoded = decoded {
+                        cost = Int(decoded.size.width * decoded.size.height * 4)
+                    }
+                } else {
+                    decodeFailed = true
                 }
+            }
+            if decodeFailed {
+                // GP v2.6 (B-02): bytes on disk that do not decode
+                // as an image are not a cover — delete the file so
+                // the next retrieve trigger re-fetches it, instead of
+                // every existence check treating it as valid art
+                // forever.
+                try? FileManager.default.removeItem(atPath: path)
             }
             DispatchQueue.main.async {
                 // The decode is no longer in flight, whatever its
@@ -279,8 +362,13 @@ enum GPCatalog {
                 boxArtRequested.remove(key)
                 guard let decoded = decoded else { return }
                 boxArtCache.setObject(decoded, forKey: key, cost: cost)
-                if let decodedDate = decodedDate {
-                    boxArtFileDates[key] = decodedDate
+                // GP v2.6 (B-11): if no date was captured before the
+                // decode, re-stat the file now — recording the date
+                // is what stops the next rebuild dropping this entry
+                // and re-decoding it in a loop.
+                let finalDate = decodedDate ?? (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                if let finalDate = finalDate {
+                    boxArtFileDates[key] = finalDate
                 }
                 NotificationCenter.default.post(name: .GPAppListChanged, object: host)
             }
