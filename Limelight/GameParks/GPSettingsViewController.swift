@@ -416,22 +416,6 @@ final class GPSettingsViewController: GPBaseViewController {
     }
 
     @objc private func addByAddressTapped() {
-        let alert = UIAlertController(title: "Add a PC by address",
-                                      message: "Enter your PC's IP address on your home network (find it in Sunshine on the PC).",
-                                      preferredStyle: .alert)
-        alert.addTextField { field in
-            field.placeholder = "192.168.1.50"
-            field.keyboardType = .decimalPad
-        }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Add", style: .default) { _ in
-            guard let address = alert.textFields?.first?.text, !address.isEmpty else { return }
-            GPEngine.shared.addHost(address: address) { success, error in
-                if !success {
-                    self.showMessage(title: "PC not found", message: error ?? "No PC answered at that address. Check the address and that Sunshine is running.")
-                }
-            }
-        })
-        present(alert, animated: true)
+        presentAddByAddress()
     }
 }

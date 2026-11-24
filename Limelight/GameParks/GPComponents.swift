@@ -282,4 +282,30 @@ class GPBaseViewController: UIViewController {
         alert.addAction(UIAlertAction(title: button, style: .default))
         present(alert, animated: true)
     }
+
+    /// Add a PC by typing its address — a primary way to connect, not a
+    /// fallback. It probes the PC directly over HTTP
+    /// (DiscoveryManager.discoverHost), so it never depends on Bonjour.
+    /// That matters because GameParks runs inside LiveContainer: Bonjour
+    /// browsing there is governed by the container app's own Info.plist,
+    /// not GameParks', so automatic discovery is not guaranteed to work.
+    func presentAddByAddress() {
+        let alert = UIAlertController(title: "Add a PC by address",
+                                      message: "Enter your PC's IP address on your home network (find it in Sunshine on the PC).",
+                                      preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "192.168.1.50"
+            field.keyboardType = .decimalPad
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Add", style: .default) { [weak self] _ in
+            guard let address = alert.textFields?.first?.text, !address.isEmpty else { return }
+            GPEngine.shared.addHost(address: address) { [weak self] success, error in
+                if !success {
+                    self?.showMessage(title: "PC not found", message: error ?? "No PC answered at that address. Check the address and that Sunshine is running.")
+                }
+            }
+        })
+        present(alert, animated: true)
+    }
 }

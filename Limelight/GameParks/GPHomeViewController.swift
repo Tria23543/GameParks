@@ -94,8 +94,17 @@ final class GPHomeViewController: GPBaseViewController {
         stack.addArrangedSubview(makeHostCard(host: host))
 
         guard let host = host else {
-            stack.addArrangedSubview(GPLabel("No PC found yet. Make sure Sunshine is running on your PC and both devices are on the same Wi-Fi — or add your PC by address in Settings.",
+            stack.addArrangedSubview(GPLabel("No PC found yet. Make sure Sunshine is running on your PC and both devices are on the same Wi-Fi. If your PC doesn't appear on its own, add it directly by its address:",
                                              font: GPTheme.body(14, weight: .semibold), color: GPTheme.mut, lines: 4))
+            let addButton = UIButton(type: .system)
+            addButton.setTitle("Add your PC by address", for: .normal)
+            addButton.setTitleColor(GPTheme.accentInk, for: .normal)
+            addButton.titleLabel?.font = GPTheme.display(17, weight: .extrabold)
+            addButton.backgroundColor = GPTheme.accent
+            addButton.round(16)
+            addButton.contentEdgeInsets = UIEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+            addButton.addTarget(self, action: #selector(addByAddressTapped), for: .touchUpInside)
+            stack.addArrangedSubview(addButton)
             return
         }
 
@@ -314,6 +323,10 @@ final class GPHomeViewController: GPBaseViewController {
     }
 
     // MARK: - Actions
+
+    @objc private func addByAddressTapped() {
+        presentAddByAddress()
+    }
 
     @objc private func hostCardTapped() {
         guard let host = GPEngine.shared.selectedHost else { return }
