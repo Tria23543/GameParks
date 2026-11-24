@@ -154,7 +154,7 @@ final class GPEngine: NSObject {
     }
 
     func sortedApps(for host: TemporaryHost) -> [TemporaryApp] {
-        let apps = (host.appList.allObjects as? [TemporaryApp] ?? []).filter { !$0.hidden }
+        let apps = host.appList.compactMap { $0 as? TemporaryApp }.filter { !$0.hidden }
         return apps.sorted { $0.compareName($1) == .orderedAscending }
     }
 
@@ -201,7 +201,10 @@ final class GPEngine: NSObject {
     private func fetchServerInfo(_ host: TemporaryHost, completion: @escaping (Bool) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let start = Date()
-            let hMan = HttpManager(host: host)
+            guard let hMan = HttpManager(host: host) else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
             let response = ServerInfoResponse()
             let request = HttpRequest(forResponse: response,
                                       withUrlRequest: hMan.newServerInfoRequest(false),
@@ -236,8 +239,11 @@ final class GPEngine: NSObject {
         // Polling the server while pairing causes the server to screw up,
         // so discovery stops completely first (same as the engine's own flow).
         discoveryManager?.stopDiscoveryBlocking()
-        let hMan = HttpManager(host: host)
-        let pairManager = PairManager(manager: hMan, clientCert: cert, callback: self)
+        guard let hMan = HttpManager(host: host),
+              let pairManager = PairManager(manager: hMan, clientCert: cert, callback: self) else {
+            onPairingResult?(false, "Pairing is not ready yet — try again in a moment.")
+            return
+        }
         opQueue.addOperation(pairManager)
     }
 
@@ -249,7 +255,7 @@ final class GPEngine: NSObject {
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if response.isStatusOk(), let appList = response.getAppList() {
+                if let response = response, response.isStatusOk(), let appList = response.getAppList() {
                     host.appList = appList
                     self.dataManager.updateApps(forExistingHost: host)
                     NotificationCenter.default.post(name: .gpAppListChanged, object: nil)
@@ -262,7 +268,7 @@ final class GPEngine: NSObject {
 
     func wake(_ host: TemporaryHost) {
         DispatchQueue.global(qos: .userInitiated).async {
-            WakeOnLanManager.wakeHost(host)
+            WakeOnLanManager.wake(host)
         }
     }
 
@@ -271,7 +277,7 @@ final class GPEngine: NSObject {
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if let host = host {
-                    self.dataManager.updateHost(host)
+                    self.dataManager.update(host)
                     if !self.hosts.contains(where: { $0.uuid == host.uuid }) {
                         self.hosts.append(host)
                         self.hosts.sort { $0.compareName($1) == .orderedAscending }
@@ -288,7 +294,7 @@ final class GPEngine: NSObject {
 
     func removeHost(_ host: TemporaryHost) {
         discoveryManager?.removeHost(fromDiscovery: host)
-        dataManager.removeHost(host)
+        dataManager.remove(host)
         hosts.removeAll { $0.uuid == host.uuid }
         if selectedHost?.uuid == host.uuid {
             selectedHost = hosts.first
@@ -298,7 +304,10 @@ final class GPEngine: NSObject {
 
     func quitCurrentApp(on host: TemporaryHost, completion: @escaping () -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let hMan = HttpManager(host: host)
+            guard let hMan = HttpManager(host: host) else {
+                DispatchQueue.main.async { completion() }
+                return
+            }
             let response = HttpResponse()
             let request = HttpRequest(forResponse: response, withUrlRequest: hMan.newQuitAppRequest())
             self?.discoveryManager?.pauseDiscovery(for: host)
@@ -320,7 +329,7 @@ final class GPEngine: NSObject {
         guard let host = app.host, host.pairState == .paired else {
             return nil
         }
-        let config = GPStreamConfigBuilder.configForApp(app)
+        let config = GPStreamConfigBuilder.config(for: app)
         return GPStreamLauncher.streamViewController(withConfig: config)
     }
 
