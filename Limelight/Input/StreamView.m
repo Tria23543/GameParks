@@ -9,6 +9,7 @@
 #import "StreamView.h"
 #include <Limelight.h>
 #import "DataManager.h"
+#import "VideoDecoderRenderer.h"
 #import "ControllerSupport.h"
 #import "KeyboardSupport.h"
 #import "RelativeTouchHandler.h"
@@ -169,12 +170,18 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     [super layoutSubviews];
 
     // GameParks: this view is created with the frame the stream screen
-    // has before the interface rotates into landscape, and the
-    // on-screen controls lay themselves out from that frame. When the
-    // size changes, make the controls lay out against the real size.
+    // has before the interface rotates into landscape, and both the
+    // on-screen controls and the video display layer are laid out from
+    // that frame. When the size changes, refit both against the real
+    // size. This hook is the one place that provably fires with the
+    // final bounds after rotation (the controls visibly refit on
+    // device in v2.1); the video refit lives here too so it shares
+    // that fate, rather than relying on KVO of "bounds", which UIKit
+    // does not deliver for this view's layer-backed geometry.
     if (!CGSizeEqualToSize(self.bounds.size, _lastLayoutSize)) {
         _lastLayoutSize = self.bounds.size;
         [onScreenControls refreshLayout];
+        [self.videoRenderer updateDisplayLayerGeometry];
     }
 }
 

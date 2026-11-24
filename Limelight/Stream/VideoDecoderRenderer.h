@@ -21,6 +21,11 @@
 - (void)stop;
 - (void)setHdrMode:(BOOL)enabled;
 
+// GameParks: recomputes the display layer's bounds/position from the
+// stream view's current bounds. Called by StreamView.layoutSubviews
+// whenever the view's size changes (e.g. rotation into landscape).
+- (void)updateDisplayLayerGeometry;
+
 - (int)submitDecodeBuffer:(unsigned char *)data length:(int)length bufferType:(int)bufferType decodeUnit:(PDECODE_UNIT)du;
 
 @end

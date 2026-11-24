@@ -37,13 +37,18 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     BOOL framePacing;
 }
 
-static void *GPViewBoundsContext = &GPViewBoundsContext;
-
 // GameParks: the display layer's geometry is computed from the stream
 // view's bounds. Upstream is landscape-only, so those bounds never
 // change after setup; GameParks pushes this view from a portrait app,
 // so the bounds change when the interface rotates into landscape.
-// Recompute the geometry whenever the view's bounds change.
+// This method is the ONLY writer of the layer's bounds/position and it
+// reads the view's bounds fresh at write time. It is called when the
+// layer is (re)created and again from StreamView.layoutSubviews on
+// every size change — v2.1 instead relied on KVO of the view's
+// "bounds" property, which UIKit does not deliver for layer-backed
+// views when the frame is assigned during layout, so the refit never
+// reached the layer on device (the layoutSubviews-driven on-screen
+// controls in the same view did refit, proving the hook fires).
 - (void)updateDisplayLayerGeometry
 {
     if (displayLayer == nil) {
@@ -110,34 +115,13 @@ static void *GPViewBoundsContext = &GPViewBoundsContext;
 
     [self reinitializeDisplayLayer];
 
-    // GameParks: follow the stream view's bounds (see
-    // updateDisplayLayerGeometry) so the video re-fills the screen
-    // when the interface rotates after this renderer was created.
-    [_view addObserver:self
-            forKeyPath:@"bounds"
-               options:0
-               context:GPViewBoundsContext];
+    // GameParks: hand ourselves to the stream view so its
+    // layoutSubviews can drive updateDisplayLayerGeometry whenever
+    // its size changes (see the note on that method). The view holds
+    // us weakly; the connection machinery owns the renderer.
+    _view.videoRenderer = self;
 
     return self;
-}
-
-- (void)observeValueForKeyPath:(NSString *)keyPath
-                      ofObject:(id)object
-                        change:(NSDictionary<NSKeyValueChangeKey, id> *)change
-                       context:(void *)context
-{
-    if (context == GPViewBoundsContext) {
-        // GameParks: the stream view was resized (rotation) — refit
-        // the video layer to the new bounds.
-        [self updateDisplayLayerGeometry];
-    } else {
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
-    }
-}
-
-- (void)dealloc
-{
-    [_view removeObserver:self forKeyPath:@"bounds" context:GPViewBoundsContext];
 }
 
 - (void)setupWithVideoFormat:(int)videoFormat width:(int)videoWidth height:(int)videoHeight frameRate:(int)frameRate

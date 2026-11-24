@@ -50,6 +50,9 @@
     UIButton *_exitButton;
     BOOL _userIsInteracting;
     CGSize _keyboardSize;
+    // GameParks: last size seen by viewWillLayoutSubviews, used to
+    // refit the absolute-mode scroll view only when the size changes.
+    CGSize _gpLastLayoutSize;
     
 #if !TARGET_OS_TV
     UIScreenEdgePanGestureRecognizer *_exitSwipeRecognizer;
@@ -281,11 +284,24 @@
     [super viewWillLayoutSubviews];
 
     CGRect bounds = self.view.bounds;
+    BOOL sizeChanged = !CGSizeEqualToSize(bounds.size, _gpLastLayoutSize);
+    _gpLastLayoutSize = bounds.size;
     if (_streamView != nil) {
         _streamView.frame = bounds;
     }
     if (_scrollView != nil) {
         _scrollView.frame = bounds;
+        if (sizeChanged) {
+            // GameParks: in absolute-touch mode the stream view lives
+            // inside this scroll view, which was also created with the
+            // pre-rotation portrait frame. Refit its content to the
+            // real bounds on a size change so the (now full-size)
+            // stream view isn't rendered small through a stale
+            // content size or zoom. (GameParks seeds absolute touch
+            // mode off, so this branch is defensive.)
+            _scrollView.contentSize = bounds.size;
+            _scrollView.zoomScale = 1.0;
+        }
     }
     _stageLabel.center = CGPointMake(bounds.size.width / 2, bounds.size.height / 2);
     _spinner.center = CGPointMake(bounds.size.width / 2, bounds.size.height / 2 - _stageLabel.frame.size.height - _spinner.frame.size.height);
