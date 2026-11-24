@@ -127,7 +127,7 @@ final class GPLibraryViewController: GPBaseViewController {
         if !normalizedQuery.isEmpty && normalizedName.contains(normalizedQuery) { return true }
         let nameTokens = normalizedName.split(separator: " ").map(String.init)
         let queryTokens = normalizedQuery.split(separator: " ").map(String.init)
-        if !queryTokens.isEmpty && queryTokens.allSatisfy { nameTokens.contains($0) } { return true }
+        if !queryTokens.isEmpty && queryTokens.allSatisfy({ nameTokens.contains($0) }) { return true }
         // (a) spaces-removed comparison, both directions of containment
         // on the name side: the spaceless query inside the spaceless name.
         let spacelessName = nameTokens.joined()

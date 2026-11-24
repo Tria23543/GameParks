@@ -60,7 +60,7 @@ final class GPConnectingViewController: GPBaseViewController {
         self.host = host
         self.app = app
         self.hostUUID = host.uuid ?? ""
-        self.hostName = host.name ?? ""
+        self.hostName = host.name
         super.init(nibName: nil, bundle: nil)
     }
 
