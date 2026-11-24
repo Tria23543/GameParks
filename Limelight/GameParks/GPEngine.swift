@@ -26,6 +26,10 @@ final class GPEngine: NSObject {
 
     private var dataManager: DataManager { return DataManager() }
     private var discoveryManager: DiscoveryManager?
+    private let subnetScanner = GPSubnetScanner()
+    private var scanInProgress = false
+    private var lastScanStarted: Date?
+    private var scanCompletions: [() -> Void] = []
     private let opQueue = OperationQueue()
     private var clientCert: Data?
     private var started = false
@@ -60,6 +64,7 @@ final class GPEngine: NSObject {
 
         discoveryManager = DiscoveryManager(hosts: hosts, andCallback: self)
         discoveryManager?.startDiscovery()
+        scanLocalNetwork(force: true)
 
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
                                                name: UIApplication.didBecomeActiveNotification, object: nil)
@@ -70,6 +75,7 @@ final class GPEngine: NSObject {
     @objc private func appDidBecomeActive() {
         discoveryManager?.resetDiscoveryState()
         discoveryManager?.startDiscovery()
+        scanLocalNetwork()
         if let host = selectedHost, host.state == .online, host.pairState == .paired {
             refreshAppList(host)
         }
@@ -300,6 +306,72 @@ final class GPEngine: NSObject {
             selectedHost = hosts.first
         }
         notifyHostsChanged()
+    }
+
+    // MARK: - Subnet scan (automatic discovery without Bonjour)
+
+    /// Sweeps the local subnet for GameStream PCs and adopts every
+    /// validated host it finds. This is the automatic discovery that
+    /// works inside LiveContainer, where Bonjour cannot be relied on
+    /// (see GPSubnetScanner). Non-forced calls are throttled so the
+    /// Home screen appearing can't start sweep after sweep.
+    func scanLocalNetwork(force: Bool = false, completion: (() -> Void)? = nil) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.scanLocalNetwork(force: force, completion: completion)
+            }
+            return
+        }
+        if let completion = completion {
+            scanCompletions.append(completion)
+        }
+        guard let discoveryManager = discoveryManager else {
+            finishScan()
+            return
+        }
+        if scanInProgress {
+            return
+        }
+        if !force, let last = lastScanStarted, Date().timeIntervalSince(last) < 20 {
+            finishScan()
+            return
+        }
+        scanInProgress = true
+        lastScanStarted = Date()
+        subnetScanner.scan(discoveryManager: discoveryManager, onHost: { [weak self] host in
+            DispatchQueue.main.async {
+                self?.adoptDiscoveredHost(host)
+            }
+        }, completion: { [weak self] in
+            self?.scanInProgress = false
+            self?.finishScan()
+        })
+    }
+
+    private func finishScan() {
+        let completions = scanCompletions
+        scanCompletions.removeAll()
+        completions.forEach { $0() }
+    }
+
+    /// A PC found by the subnet scan — already validated and built by
+    /// DiscoveryManager.discoverHost (the manual add-by-IP code path),
+    /// and already in the discovery queue. Save it, merge it into the
+    /// host list (deduped by uuid against saved and Bonjour-found
+    /// hosts) and tell the screens, exactly like a manual add.
+    private func adoptDiscoveredHost(_ host: TemporaryHost) {
+        dataManager.update(host)
+        if !hosts.contains(where: { $0.uuid == host.uuid }) {
+            hosts.append(host)
+            hosts.sort { $0.compareName($1) == .orderedAscending }
+        }
+        if selectedHost == nil {
+            selectedHost = host
+        }
+        notifyHostsChanged()
+        if host.pairState == .paired {
+            refreshAppList(host)
+        }
     }
 
     func quitCurrentApp(on host: TemporaryHost, completion: @escaping () -> Void) {

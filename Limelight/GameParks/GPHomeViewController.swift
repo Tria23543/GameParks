@@ -29,6 +29,10 @@ final class GPHomeViewController: GPBaseViewController {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scrollView)
 
+        let refreshControl = UIRefreshControl()
+        refreshControl.addTarget(self, action: #selector(refreshPulled(_:)), for: .valueChanged)
+        scrollView.refreshControl = refreshControl
+
         stack.axis = .vertical
         stack.spacing = 26
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -55,7 +59,14 @@ final class GPHomeViewController: GPBaseViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        GPEngine.shared.scanLocalNetwork()
         reload()
+    }
+
+    @objc private func refreshPulled(_ sender: UIRefreshControl) {
+        GPEngine.shared.scanLocalNetwork(force: true) {
+            sender.endRefreshing()
+        }
     }
 
     private func makeRail(tag: Int) -> UICollectionView {
@@ -105,6 +116,12 @@ final class GPHomeViewController: GPBaseViewController {
             addButton.contentEdgeInsets = UIEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
             addButton.addTarget(self, action: #selector(addByAddressTapped), for: .touchUpInside)
             stack.addArrangedSubview(addButton)
+            let searchButton = UIButton(type: .system)
+            searchButton.setTitle("Search again", for: .normal)
+            searchButton.setTitleColor(GPTheme.accent, for: .normal)
+            searchButton.titleLabel?.font = GPTheme.body(15, weight: .bold)
+            searchButton.addTarget(self, action: #selector(searchAgainTapped), for: .touchUpInside)
+            stack.addArrangedSubview(searchButton)
             return
         }
 
@@ -326,6 +343,10 @@ final class GPHomeViewController: GPBaseViewController {
 
     @objc private func addByAddressTapped() {
         presentAddByAddress()
+    }
+
+    @objc private func searchAgainTapped() {
+        GPEngine.shared.scanLocalNetwork(force: true)
     }
 
     @objc private func hostCardTapped() {
