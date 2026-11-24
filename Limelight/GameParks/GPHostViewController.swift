@@ -61,7 +61,7 @@ final class GPHostViewController: GPBaseViewController {
         let header = UIStackView()
         header.axis = .vertical
         header.spacing = 4
-        header.addArrangedSubview(GPLabel(host.name ?? "Home Laptop", font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink, lines: 2))
+        header.addArrangedSubview(GPLabel(host.name, font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink, lines: 2))
         header.addArrangedSubview(GPLabel("Your host", font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut))
         stack.addArrangedSubview(header)
 
@@ -92,7 +92,7 @@ final class GPHostViewController: GPBaseViewController {
             statusLine.addArrangedSubview(GPLabel("\(ping) ms", font: GPTheme.display(15, weight: .bold), color: GPTheme.accent))
         }
         statusStack.addArrangedSubview(statusLine)
-        statusStack.addArrangedSubview(GPLabel(online ? "Sunshine running · ready to stream" : "Wake it from here when you play",
+        statusStack.addArrangedSubview(GPLabel(online ? "Sunshine running · ready to stream" : "Tap Wake below when you want to play",
                                                font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut))
         statusCard.addSubview(statusStack)
         NSLayoutConstraint.activate([
@@ -104,19 +104,25 @@ final class GPHostViewController: GPBaseViewController {
         stack.addArrangedSubview(statusCard)
 
         // Detail rows
-        stack.addArrangedSubview(detailRow(title: "Machine", value: "Windows 10", detail: "Fresh install · fully updated"))
-        stack.addArrangedSubview(detailRow(title: "Connection", value: "Home Wi-Fi · same network", detail: online ? "Excellent" : "—"))
+        stack.addArrangedSubview(detailRow(title: "Machine", value: "Sunshine host", detail: "Streams your games to this phone"))
+        let connectionDetail: String
+        if online, let ping = engine.ping(for: host) {
+            connectionDetail = "\(ping) ms · Excellent"
+        } else {
+            connectionDetail = online ? "Online" : "Asleep"
+        }
+        stack.addArrangedSubview(detailRow(title: "Connection", value: "Home Wi-Fi · same network", detail: connectionDetail))
         let controllerReady = engine.bluetoothControllerConnected
         stack.addArrangedSubview(detailRow(title: "Controller",
-                                           value: "Bluetooth · connected to iPhone",
-                                           detail: controllerReady ? "Ready" : "Not connected — touch controls will show instead"))
+                                           value: controllerReady ? "Bluetooth · connected to iPhone" : "Bluetooth · not connected",
+                                           detail: controllerReady ? "Ready" : "Touch controls will show instead"))
 
         let apps = engine.sortedApps(for: host)
         let steamCount = apps.filter { GPGameMeta.meta(forAppName: $0.name ?? "").sourceTag == "Steam" }.count
         let ownCount = apps.count - steamCount
         stack.addArrangedSubview(detailRow(title: "Games on this host",
-                                           value: "\(steamCount) Steam · \(ownCount) your own installs",
-                                           detail: "\(apps.count)"))
+                                           value: "\(apps.count) games",
+                                           detail: "\(steamCount) Steam · \(ownCount) your own installs"))
 
         // Actions
         stack.addArrangedSubview(GPSectionHeader(title: "Actions"))
@@ -125,7 +131,7 @@ final class GPHostViewController: GPBaseViewController {
             wake.addTarget(self, action: #selector(wakeTapped), for: .touchUpInside)
             stack.addArrangedSubview(wake)
         }
-        let restart = GPRow(title: "Restart Sunshine", subtitle: "If a stream ever misbehaves")
+        let restart = GPRow(title: "Reconnect to Sunshine", subtitle: "If a stream ever misbehaves — refreshes the connection")
         restart.addTarget(self, action: #selector(restartTapped), for: .touchUpInside)
         stack.addArrangedSubview(restart)
 
@@ -198,6 +204,11 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func pairTapped() {
+        if host.pairState == .paired {
+            showMessage(title: "Pair a new device",
+                        message: "New devices pair from the new device itself: open GameParks there, tap this PC, and enter the PIN it shows in the Sunshine web UI here.")
+            return
+        }
         GPEngine.shared.activateHost(host, userInitiated: true)
     }
 

@@ -61,7 +61,7 @@ final class GPGameViewController: GPBaseViewController {
         stack.addArrangedSubview(titleBlock)
 
         // Play button + favourite
-        let playButton = GPPlayButton(title: "Play on \(host.name ?? "Home Laptop")")
+        let playButton = GPPlayButton(title: "Play on \(host.name)")
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
         favouriteButton = UIButton(type: .system)
         favouriteButton.tintColor = GPTheme.accent

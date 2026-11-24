@@ -99,7 +99,13 @@ final class GPSettingsViewController: GPBaseViewController {
         header.axis = .vertical
         header.spacing = 3
         header.addArrangedSubview(GPLabel("Settings", font: GPTheme.display(26, weight: .extrabold), color: GPTheme.ink))
-        header.addArrangedSubview(GPLabel("GameParks · paired to \(host?.name ?? "no PC yet")",
+        let headerSubtitleText: String
+        if let host = host {
+            headerSubtitleText = host.pairState == .paired ? "GameParks · paired to \(host.name)" : "GameParks · \(host.name) is not paired yet"
+        } else {
+            headerSubtitleText = "GameParks · no PC paired yet"
+        }
+        header.addArrangedSubview(GPLabel(headerSubtitleText,
                                           font: GPTheme.body(13, weight: .semibold), color: GPTheme.mut))
         stack.addArrangedSubview(header)
 
@@ -173,8 +179,19 @@ final class GPSettingsViewController: GPBaseViewController {
         // Hosts
         stack.addArrangedSubview(sectionTitle("Hosts"))
         if let host = host {
-            let hostRow = GPRow(title: host.name ?? "Home Laptop",
-                                subtitle: "Paired · Sunshine\(engine.ping(for: host) != nil ? " · \(engine.ping(for: host)!) ms" : "")",
+            let hostSubtitle: String
+            switch (host.state, host.pairState) {
+            case (.online, .paired):
+                hostSubtitle = "Paired · Sunshine\(engine.ping(for: host) != nil ? " · \(engine.ping(for: host)!) ms" : "")"
+            case (.online, _):
+                hostSubtitle = "Online · not paired"
+            case (.offline, _):
+                hostSubtitle = "Asleep · tap to wake"
+            default:
+                hostSubtitle = "Searching…"
+            }
+            let hostRow = GPRow(title: host.name,
+                                subtitle: hostSubtitle,
                                 value: "Manage")
             hostRow.addTarget(self, action: #selector(manageHostTapped), for: .touchUpInside)
             stack.addArrangedSubview(hostRow)
@@ -344,6 +361,7 @@ final class GPSettingsViewController: GPBaseViewController {
             ("Auto (recommended)", { self.state.codec = 0 }),
             ("H.265", { self.state.codec = 2 }),
             ("H.264", { self.state.codec = 1 }),
+            ("AV1", { self.state.codec = 3 }),
         ])
     }
 

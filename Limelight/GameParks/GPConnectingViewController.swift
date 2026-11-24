@@ -8,7 +8,6 @@
 //
 
 import UIKit
-import GameController
 
 final class GPConnectingViewController: GPBaseViewController {
     private let app: TemporaryApp
@@ -114,7 +113,7 @@ final class GPConnectingViewController: GPBaseViewController {
 
     private func runConnectionSequence() {
         guard let host = app.host else {
-            fail(message: "This game has no host anymore.")
+            fail(message: "This game's PC is no longer available.")
             return
         }
         let engine = GPEngine.shared

@@ -10,7 +10,9 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <VideoToolbox/VideoToolbox.h>
-#import <sys/utsname.h>
+
+// Note: the reference implementation's Apple TV HD 4K clamp is omitted —
+// GameParks only builds for iOS, where that clamp never applied.
 
 #include <Limelight.h>
 

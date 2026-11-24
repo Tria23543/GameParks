@@ -124,8 +124,7 @@ final class GPHomeViewController: GPBaseViewController {
             classicsRail.reloadData()
         }
         if !otherApps.isEmpty {
-            let header = GPSectionHeader(title: "More on \(host.name ?? "your PC")")
-            stack.addArrangedSubview(header)
+            stack.addArrangedSubview(makeSectionHeader(title: "More on \(host.name)", trailing: ""))
             for app in otherApps {
                 stack.addArrangedSubview(makeWideRow(app: app, host: host))
             }

@@ -31,10 +31,15 @@ struct GPGameMeta {
                               genreLine: "Open world · Rockstar Games", group: .big,
                               description: "Los Santos is yours — switch between three criminals, pull off daring heists and roam a huge open world.")
         }
-        if name.contains("red dead redemption") {
+        if name.contains("red dead redemption ii") || name.contains("red dead redemption 2") {
             return GPGameMeta(coverResource: "cover_rdr2", sourceTag: "Steam",
                               genreLine: "Western · Rockstar Games", group: .big,
                               description: "America, 1899. The end of the Wild West era has begun. Run with Dutch's gang across a harsh, unforgiving heartland.")
+        }
+        if name.contains("red dead redemption") {
+            return GPGameMeta(coverResource: nil, sourceTag: "Steam",
+                              genreLine: "Western · Rockstar Games", group: .big,
+                              description: "John Marston hunts down his old gang across the dying American frontier.")
         }
         if name.contains("last of us") {
             return GPGameMeta(coverResource: "cover_tlou", sourceTag: "Steam",
@@ -71,7 +76,7 @@ struct GPGameMeta {
                               genreLine: "Full desktop · Sunshine", group: .other,
                               description: "Your whole PC desktop, streamed. Launch anything — Steam not required.")
         }
-        return GPGameMeta(coverResource: nil, sourceTag: "Steam",
+        return GPGameMeta(coverResource: nil, sourceTag: "Your PC",
                           genreLine: "On your PC", group: .other, description: nil)
     }
 

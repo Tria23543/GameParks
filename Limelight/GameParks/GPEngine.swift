@@ -29,7 +29,7 @@ final class GPEngine: NSObject {
     private let opQueue = OperationQueue()
     private var clientCert: Data?
     private var started = false
-    private var lastPingMs: [String: Int] = [:]
+    private var lastPingSamples: [String: [Int]] = [:]
 
     // Active stream tracking for stats
     private var activeStreamAppKey: String?
@@ -147,10 +147,10 @@ final class GPEngine: NSObject {
     // MARK: - Host helpers
 
     func ping(for host: TemporaryHost) -> Int? {
-        guard let uuid = host.uuid else {
+        guard let samples = lastPingSamples[host.uuid], !samples.isEmpty else {
             return nil
         }
-        return lastPingMs[uuid]
+        return samples.reduce(0, +) / samples.count
     }
 
     func sortedApps(for host: TemporaryHost) -> [TemporaryApp] {
@@ -214,11 +214,12 @@ final class GPEngine: NSObject {
             let ok = response.isStatusOk()
             if ok {
                 response.populateHost(host)
-                if let uuid = host.uuid {
-                    let ms = Int(Date().timeIntervalSince(start) * 1000)
-                    DispatchQueue.main.async {
-                        self?.lastPingMs[uuid] = max(ms, 1)
-                    }
+                let ms = max(Int(Date().timeIntervalSince(start) * 1000), 1)
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    var samples = self.lastPingSamples[host.uuid] ?? []
+                    samples.append(ms)
+                    self.lastPingSamples[host.uuid] = Array(samples.suffix(10))
                 }
             }
             DispatchQueue.main.async {
@@ -319,7 +320,7 @@ final class GPEngine: NSObject {
         guard let host = app.host, host.pairState == .paired else {
             return nil
         }
-        let config = GPStreamConfigBuilder.config(forApp: app)
+        let config = GPStreamConfigBuilder.configForApp(app)
         let storyboardName = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
         let storyboard = UIStoryboard(name: storyboardName, bundle: nil)
         guard let streamVC = storyboard.instantiateViewController(withIdentifier: "streamFrame") as? StreamFrameViewController else {
