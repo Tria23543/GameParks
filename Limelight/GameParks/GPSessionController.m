@@ -1287,7 +1287,7 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             certHash *= 16777619u;
         }
         NSMutableString *appsSignature = [NSMutableString string];
-        NSArray<TemporaryApp *> *apps = [host.appList sortedArrayUsingComparator:
+        NSArray<TemporaryApp *> *apps = [[host.appList allObjects] sortedArrayUsingComparator:
             ^NSComparisonResult(TemporaryApp *a, TemporaryApp *b) {
                 NSComparisonResult byId = [(a.id ?: @"") compare:(b.id ?: @"")];
                 return byId != NSOrderedSame ? byId : [(a.name ?: @"") compare:(b.name ?: @"")];
