@@ -40,7 +40,7 @@ final class GPHostViewController: GPBaseViewController {
                                                name: .GPAppListChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(hostInfoError(_:)),
                                                name: .GPHostInfoError, object: nil)
-        rebuild()
+        rebuildContent()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -55,7 +55,7 @@ final class GPHostViewController: GPBaseViewController {
         if let current = GPSessionController.shared().hosts.first(where: { $0.uuid == hostUUID }) {
             host = current
         }
-        rebuild()
+        requestContentRebuild()
     }
 
     @objc private func hostInfoError(_ note: Notification) {
@@ -69,7 +69,7 @@ final class GPHostViewController: GPBaseViewController {
 
     // MARK: - Rendering
 
-    private func rebuild() {
+    override func rebuildContent() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let session = GPSessionController.shared()
 

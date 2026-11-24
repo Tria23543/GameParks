@@ -104,19 +104,19 @@ final class GPSettingsViewController: GPBaseViewController {
         contentStack.addArrangedSubview(dynamicStack)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
                                                name: .GPHostsChanged, object: nil)
-        rebuild()
+        rebuildContent()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        rebuild()
+        performContentRebuild()
     }
 
     @objc private func stateChanged() {
-        rebuild()
+        requestContentRebuild()
     }
 
-    private func rebuild() {
+    override func rebuildContent() {
         // The header carries the pairing state, so rebuild it too:
         // it is the scaffold's first arranged view.
         if let first = contentStack.arrangedSubviews.first, first !== dynamicStack {
@@ -237,7 +237,7 @@ final class GPSettingsViewController: GPBaseViewController {
 
     @objc private func presetTapped(_ sender: GPRow) {
         GPSettingsStore.applyPreset(sender.tag)
-        rebuild()
+        performContentRebuild()
     }
 
     @objc private func streamSettingsTapped() {
@@ -273,10 +273,10 @@ final class GPStreamSettingsViewController: GPBaseViewController {
         dynamicStack.axis = .vertical
         dynamicStack.spacing = 16
         contentStack.addArrangedSubview(dynamicStack)
-        rebuild()
+        rebuildContent()
     }
 
-    private func rebuild() {
+    override func rebuildContent() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let cur = GPSettingsStore.current()
 
@@ -415,7 +415,7 @@ final class GPStreamSettingsViewController: GPBaseViewController {
 
     @objc private func presetTapped(_ sender: GPRow) {
         GPSettingsStore.applyPreset(sender.tag)
-        rebuild()
+        performContentRebuild()
     }
 
     @objc private func resolutionChanged(_ sender: UISegmentedControl) {

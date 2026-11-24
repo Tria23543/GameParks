@@ -13,7 +13,7 @@ import UIKit
 
 // MARK: - Base view controller
 
-class GPBaseViewController: UIViewController {
+class GPBaseViewController: UIViewController, UIScrollViewDelegate {
     let scrollView = UIScrollView()
     let contentStack = UIStackView()
 
@@ -33,6 +33,7 @@ class GPBaseViewController: UIViewController {
         // Upstream sets the same on its scroll views: touches must
         // reach controls without the scroll view sitting on them.
         scrollView.delaysContentTouches = false
+        scrollView.delegate = self
         scrollView.showsVerticalScrollIndicator = false
         view.addSubview(scrollView)
 
@@ -63,7 +64,7 @@ class GPBaseViewController: UIViewController {
         container.spacing = 4
 
         if showsBack {
-            let back = UIButton(type: .system)
+            let back = GPGuardedButton(type: .system)
             back.setTitle("‹  Back", for: .normal)
             back.setTitleColor(GPColor.accent, for: .normal)
             back.titleLabel?.font = GPFont.body(16, weight: .semibold)
@@ -127,12 +128,186 @@ class GPBaseViewController: UIViewController {
         })
         present(alert, animated: true)
     }
+
+    // MARK: - Scroll-aware content rebuilds
+
+    private var contentRebuildPending = false
+    private var flushRecheckScheduled = false
+
+    /// Screens override this to (re)build their dynamic content.
+    /// Notification handlers must not call it directly — they go
+    /// through requestContentRebuild() so a background refresh can
+    /// never tear the screen down mid-scroll or mid-tap.
+    func rebuildContent() {}
+
+    /// Whether scrolling is in progress somewhere beyond the
+    /// scaffold's own scroll view (Home's horizontal rails).
+    var supplementaryScrollBusy: Bool { false }
+
+    private var scrollBusy: Bool {
+        return scrollView.isDragging || scrollView.isDecelerating || scrollView.isTracking
+            || supplementaryScrollBusy
+    }
+
+    /// The notification-driven refresh entry point. While the user
+    /// is dragging, coasting, or even just holding a finger on a
+    /// row, the rebuild is held until the interaction fully ends:
+    /// rebuilding mid-gesture destroys the view under the finger
+    /// (killing or misfiring the tap) and stalls the scroll with a
+    /// full teardown-and-layout pass.
+    func requestContentRebuild() {
+        if scrollBusy {
+            contentRebuildPending = true
+            scheduleFlushRecheck()
+            return
+        }
+        performContentRebuild()
+    }
+
+    /// Rebuilds now, keeping the user's place: the scroll offset is
+    /// restored afterwards (clamped to the new content size), so a
+    /// background refresh never makes the page jump.
+    func performContentRebuild() {
+        contentRebuildPending = false
+        let offsetY = scrollView.contentOffset.y
+        rebuildContent()
+        view.layoutIfNeeded()
+        let minY = -scrollView.adjustedContentInset.top
+        let maxY = max(minY, scrollView.contentSize.height - scrollView.bounds.height
+                       + scrollView.adjustedContentInset.bottom)
+        scrollView.contentOffset.y = min(max(offsetY, minY), maxY)
+    }
+
+    private func flushPendingContentRebuild() {
+        if contentRebuildPending && !scrollBusy {
+            performContentRebuild()
+        }
+    }
+
+    /// A deferred rebuild normally flushes from the scroll-end
+    /// delegate callbacks below. A touch that never becomes a drag
+    /// (a held finger) produces no such callback, so a deferred
+    /// rebuild also re-checks shortly after being held — and keeps
+    /// re-checking while the interaction genuinely continues.
+    private func scheduleFlushRecheck() {
+        guard !flushRecheckScheduled else { return }
+        flushRecheckScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            self.flushRecheckScheduled = false
+            if self.contentRebuildPending && self.scrollBusy {
+                self.scheduleFlushRecheck()
+            } else {
+                self.flushPendingContentRebuild()
+            }
+        }
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate {
+            flushPendingContentRebuild()
+        }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        flushPendingContentRebuild()
+    }
+}
+
+// MARK: - Scroll-safe controls
+
+/// Remembers where every scroll view above a control stood when a
+/// touch began. To a plain UIControl, a tap and the start of a
+/// scroll feel identical until the finger moves — and if the touch
+/// ends before the scroll view's pan recogniser takes over (a slow
+/// drag, or a swipe at the content's edge where the content cannot
+/// move), the control sees an ordinary touch-up inside itself and
+/// fires, even though the user was scrolling. Comparing the scroll
+/// offsets before and after tells the two apart exactly.
+final class GPScrollGuard {
+    private var snapshots: [(scrollView: UIScrollView, offset: CGPoint)] = []
+    private let movementThreshold: CGFloat = 6
+
+    func begin(for view: UIView) {
+        snapshots.removeAll()
+        var ancestor = view.superview
+        while let current = ancestor {
+            if let scrollView = current as? UIScrollView {
+                snapshots.append((scrollView, scrollView.contentOffset))
+            }
+            ancestor = current.superview
+        }
+    }
+
+    var contentScrolled: Bool {
+        return snapshots.contains { entry in
+            abs(entry.scrollView.contentOffset.x - entry.offset.x) > movementThreshold
+                || abs(entry.scrollView.contentOffset.y - entry.offset.y) > movementThreshold
+        }
+    }
+
+    func reset() {
+        snapshots.removeAll()
+    }
+}
+
+/// A UIControl that never fires its action for a touch that turned
+/// into a scroll drag: if any scroll view above it moved during the
+/// touch, the touch ends as a cancellation instead of a touch-up.
+/// A genuine tap (no scroll movement) fires exactly as before.
+class GPGuardedControl: UIControl {
+    private let scrollGuard = GPScrollGuard()
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.begin(for: self)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if scrollGuard.contentScrolled {
+            super.touchesCancelled(touches, with: event)
+        } else {
+            super.touchesEnded(touches, with: event)
+        }
+        scrollGuard.reset()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.reset()
+        super.touchesCancelled(touches, with: event)
+    }
+}
+
+/// The same scroll-safety for buttons (same overrides as
+/// GPGuardedControl — Swift gives the two UIKit base classes no
+/// shared implementation point).
+class GPGuardedButton: UIButton {
+    private let scrollGuard = GPScrollGuard()
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.begin(for: self)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if scrollGuard.contentScrolled {
+            super.touchesCancelled(touches, with: event)
+        } else {
+            super.touchesEnded(touches, with: event)
+        }
+        scrollGuard.reset()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        scrollGuard.reset()
+        super.touchesCancelled(touches, with: event)
+    }
 }
 
 // MARK: - Buttons
 
 func gpPrimaryButton(_ title: String) -> UIButton {
-    let button = UIButton(type: .system)
+    let button = GPGuardedButton(type: .system)
     button.setTitle(title, for: .normal)
     button.setTitleColor(GPColor.onAccent, for: .normal)
     button.titleLabel?.font = GPFont.display(16, weight: .bold)
@@ -144,7 +319,7 @@ func gpPrimaryButton(_ title: String) -> UIButton {
 }
 
 func gpSecondaryButton(_ title: String) -> UIButton {
-    let button = UIButton(type: .system)
+    let button = GPGuardedButton(type: .system)
     button.setTitle(title, for: .normal)
     button.setTitleColor(GPColor.textPrimary, for: .normal)
     button.titleLabel?.font = GPFont.body(15, weight: .semibold)
@@ -158,7 +333,7 @@ func gpSecondaryButton(_ title: String) -> UIButton {
 // MARK: - Card button
 
 /// A tappable panel card. Content goes into `stack`.
-final class GPCardButton: UIControl {
+final class GPCardButton: GPGuardedControl {
     let stack = UIStackView()
 
     init() {
@@ -189,7 +364,7 @@ final class GPCardButton: UIControl {
 
 /// A tappable settings/list row: title, subtitle, optional value and
 /// chevron.
-final class GPRow: UIControl {
+final class GPRow: GPGuardedControl {
     let titleLabel = gpLabel(nil, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1)
     let subtitleLabel = gpLabel(nil, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
     let valueLabel = gpLabel(nil, font: GPFont.body(14, weight: .semibold), color: GPColor.textSecondary, lines: 1)
@@ -241,7 +416,7 @@ final class GPRow: UIControl {
 
 /// A row with a switch. The whole row is the control; the switch is
 /// display-only, so a tap anywhere flips it.
-final class GPSwitchRow: UIControl {
+final class GPSwitchRow: GPGuardedControl {
     let titleLabel = gpLabel(nil, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1)
     let subtitleLabel = gpLabel(nil, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
     let toggle = UISwitch()
@@ -319,7 +494,7 @@ func gpSectionHeader(_ title: String, subtitle: String? = nil) -> UIView {
 
 /// A game poster: bundled cover art when we have it, otherwise a
 /// title tile in the design's panel tone. Fixed 2:3-ish art area.
-final class GPPosterView: UIControl {
+final class GPPosterView: GPGuardedControl {
     private let artContainer = UIView()
     private let imageView = UIImageView()
     private let tileLabel = gpLabel(nil, font: GPFont.display(15, weight: .bold), color: GPColor.textPrimary, lines: 3)
@@ -390,7 +565,7 @@ final class GPPosterView: UIControl {
 
 /// A horizontal app row for lists: small art, name, source line,
 /// chevron.
-final class GPAppRow: UIControl {
+final class GPAppRow: GPGuardedControl {
     private let imageView = UIImageView()
     private let tileView = UIView()
     private let tileLabel = gpLabel(nil, font: GPFont.display(11, weight: .bold), color: GPColor.textPrimary, lines: 2)
@@ -471,7 +646,7 @@ final class GPAppRow: UIControl {
 
 // MARK: - Chips
 
-final class GPChipButton: UIButton {
+final class GPChipButton: GPGuardedButton {
     var chipSelected: Bool = false {
         didSet { refreshStyle() }
     }

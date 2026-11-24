@@ -80,20 +80,20 @@ final class GPLibraryViewController: GPBaseViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
                                                name: .GPAppListChanged, object: nil)
         refreshChips()
-        rebuild()
+        rebuildContent()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        rebuild()
+        performContentRebuild()
     }
 
     @objc private func stateChanged() {
-        rebuild()
+        requestContentRebuild()
     }
 
     @objc private func searchChanged() {
-        rebuild()
+        rebuildContent()
     }
 
     private func filterTag(_ value: Filter) -> Int {
@@ -113,7 +113,7 @@ final class GPLibraryViewController: GPBaseViewController {
         default: filter = .all
         }
         refreshChips()
-        rebuild()
+        rebuildContent()
     }
 
     private func refreshChips() {
@@ -124,7 +124,7 @@ final class GPLibraryViewController: GPBaseViewController {
 
     // MARK: - Rendering
 
-    private func rebuild() {
+    override func rebuildContent() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let session = GPSessionController.shared()
 

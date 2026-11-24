@@ -16,6 +16,13 @@ final class GPHomeViewController: GPBaseViewController {
 
     private let dynamicStack = UIStackView()
     private let refreshControl = UIRefreshControl()
+    private var railScrollViews: [UIScrollView] = []
+
+    /// The horizontal game rails scroll independently of the page;
+    /// a rebuild must also wait for them (see GPBaseViewController).
+    override var supplementaryScrollBusy: Bool {
+        return railScrollViews.contains { $0.isDragging || $0.isDecelerating || $0.isTracking }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -36,16 +43,16 @@ final class GPHomeViewController: GPBaseViewController {
                                                name: .GPHostsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
                                                name: .GPAppListChanged, object: nil)
-        rebuild()
+        rebuildContent()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        rebuild()
+        performContentRebuild()
     }
 
     @objc private func stateChanged() {
-        rebuild()
+        requestContentRebuild()
     }
 
     @objc private func pulledToRefresh() {
@@ -59,7 +66,7 @@ final class GPHomeViewController: GPBaseViewController {
 
     // MARK: - Rendering
 
-    private func rebuild() {
+    override func rebuildContent() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let session = GPSessionController.shared()
 
@@ -237,6 +244,9 @@ final class GPHomeViewController: GPBaseViewController {
         let scroll = UIScrollView()
         scroll.showsHorizontalScrollIndicator = false
         scroll.delaysContentTouches = false
+        scroll.delegate = self
+        railScrollViews.removeAll { $0.superview == nil }
+        railScrollViews.append(scroll)
         let row = UIStackView()
         row.axis = .horizontal
         row.spacing = 12

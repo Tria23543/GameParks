@@ -44,12 +44,12 @@ final class GPGameViewController: GPBaseViewController {
                                                name: .GPHostsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
                                                name: .GPAppListChanged, object: nil)
-        rebuild()
+        rebuildContent()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        rebuild()
+        performContentRebuild()
     }
 
     @objc private func stateChanged() {
@@ -59,12 +59,12 @@ final class GPGameViewController: GPBaseViewController {
                 app = currentApp
             }
         }
-        rebuild()
+        requestContentRebuild()
     }
 
     // MARK: - Rendering
 
-    private func rebuild() {
+    override func rebuildContent() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let session = GPSessionController.shared()
         let info = GPCatalog.info(for: app)

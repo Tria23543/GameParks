@@ -20,15 +20,15 @@ final class GPStatsViewController: GPBaseViewController {
         dynamicStack.axis = .vertical
         dynamicStack.spacing = 16
         contentStack.addArrangedSubview(dynamicStack)
-        rebuild()
+        rebuildContent()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        rebuild()
+        performContentRebuild()
     }
 
-    private func rebuild() {
+    override func rebuildContent() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let stats = GPStats.shared
         let session = GPSessionController.shared()
