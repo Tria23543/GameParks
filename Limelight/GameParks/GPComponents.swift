@@ -11,10 +11,38 @@
 
 import UIKit
 
+// MARK: - Scroll view
+
+/// The scroll view every GameParks screen uses. Scroll-safety for
+/// the controls inside it is decided HERE, at touch-delivery level
+/// — the way Apple's own list UIs do it — not inside the controls:
+///
+/// 1. `delaysContentTouches` is left at the iOS default (true):
+///    the scroll view withholds a touch from the content while it
+///    determines whether the gesture is a pan. A gesture that
+///    becomes a pan is never delivered to a control at all.
+/// 2. `touchesShouldCancel(in:)` returns true for EVERY content
+///    view. UIKit's default returns false for UIControl instances,
+///    which is why a scroll view normally lets a tracking control
+///    keep its touch through a whole scroll and fire on touch-up.
+///    With true, the moment the pan recogniser wins, the scroll
+///    view cancels the touch inside the control: the control runs
+///    its cancellation path, its tracking ends, and no
+///    .touchUpInside can ever be dispatched for that touch.
+///
+/// Together: a scroll gesture either never reaches a control, or
+/// is cancelled inside it before the finger lifts. A stationary
+/// tap is delivered whole and fires exactly as it always did.
+final class GPScrollView: UIScrollView {
+    override func touchesShouldCancel(in contentView: UIView) -> Bool {
+        return true
+    }
+}
+
 // MARK: - Base view controller
 
 class GPBaseViewController: UIViewController, UIScrollViewDelegate {
-    let scrollView = UIScrollView()
+    let scrollView = GPScrollView()
     let contentStack = UIStackView()
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
@@ -30,9 +58,11 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
     /// with the design's 20pt side padding.
     func installScaffold() {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        // Upstream sets the same on its scroll views: touches must
-        // reach controls without the scroll view sitting on them.
-        scrollView.delaysContentTouches = false
+        // iOS default, deliberately: while the scroll view decides
+        // whether a touch is a scroll or a tap, the touch is
+        // withheld from the rows — a scroll therefore never reaches
+        // a row as a press. See GPScrollView above.
+        scrollView.delaysContentTouches = true
         scrollView.delegate = self
         scrollView.showsVerticalScrollIndicator = false
         view.addSubview(scrollView)
@@ -214,146 +244,34 @@ class GPBaseViewController: UIViewController, UIScrollViewDelegate {
     }
 }
 
-// MARK: - Scroll-safe controls
+// MARK: - Control base classes
 
-/// Remembers where every scroll view above a control stood when a
-/// touch began. To a plain UIControl, a tap and the start of a
-/// scroll feel identical until the finger moves — and if the touch
-/// ends before the scroll view's pan recogniser takes over (a slow
-/// drag, or a swipe at the content's edge where the content cannot
-/// move), the control sees an ordinary touch-up inside itself and
-/// fires, even though the user was scrolling. Comparing the scroll
-/// offsets before and after tells the two apart exactly.
-final class GPScrollGuard {
-    private var snapshots: [(scrollView: UIScrollView, offset: CGPoint)] = []
-    private let movementThreshold: CGFloat = 6
-
-    func begin(for view: UIView) {
-        snapshots.removeAll()
-        var ancestor = view.superview
-        while let current = ancestor {
-            if let scrollView = current as? UIScrollView {
-                snapshots.append((scrollView, scrollView.contentOffset))
-            }
-            ancestor = current.superview
-        }
-    }
-
-    var contentScrolled: Bool {
-        return snapshots.contains { entry in
-            abs(entry.scrollView.contentOffset.x - entry.offset.x) > movementThreshold
-                || abs(entry.scrollView.contentOffset.y - entry.offset.y) > movementThreshold
-        }
-    }
-
-    func reset() {
-        snapshots.removeAll()
-    }
-}
-
-/// A UIControl that never fires its action for a touch that turned
-/// into a scroll drag: if any scroll view above it moved during the
-/// touch, the touch ends as a cancellation instead of a touch-up.
-/// A genuine tap (no scroll movement) fires exactly as before.
+/// Plain UIKit controls. These classes carry no touch logic of
+/// their own — scroll-safety is not, and cannot be, a control's
+/// job: by the time a control sees a touch, UIKit has already
+/// decided to deliver it. The guarantee that a scroll never fires
+/// a control lives in GPScrollView (delaysContentTouches at the
+/// iOS default + touches cancelled in content views when a pan
+/// wins). The names are kept from the release that tried to guard
+/// inside the controls, so every call site stays untouched.
 class GPGuardedControl: UIControl {
-    private let scrollGuard = GPScrollGuard()
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.begin(for: self)
-        super.touchesBegan(touches, with: event)
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if scrollGuard.contentScrolled {
-            super.touchesCancelled(touches, with: event)
-        } else {
-            super.touchesEnded(touches, with: event)
-        }
-        scrollGuard.reset()
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.reset()
-        super.touchesCancelled(touches, with: event)
-    }
 }
 
-/// The same scroll-safety for segmented controls (same overrides
-/// as GPGuardedControl — Swift gives the UIKit base classes no
-/// shared implementation point). A segmented control changes a
-/// setting, so a scroll gesture must never be able to move it.
+/// A segmented control changes a setting, so it matters that it
+/// is a plain control inside a GPScrollView: a scroll gesture is
+/// withheld from it, or cancelled inside it, before it can act.
 class GPGuardedSegmentedControl: UISegmentedControl {
-    private let scrollGuard = GPScrollGuard()
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.begin(for: self)
-        super.touchesBegan(touches, with: event)
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if scrollGuard.contentScrolled {
-            super.touchesCancelled(touches, with: event)
-        } else {
-            super.touchesEnded(touches, with: event)
-        }
-        scrollGuard.reset()
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.reset()
-        super.touchesCancelled(touches, with: event)
-    }
 }
 
-/// The same scroll-safety for steppers: a resting or dragging
-/// finger on the stepper must not be able to change the value.
+/// The same reasoning for steppers: their value changes are
+/// dispatched while a touch is being tracked, so the only safe
+/// place to stop a scroll from reaching one is before delivery —
+/// which is what GPScrollView does.
 class GPGuardedStepper: UIStepper {
-    private let scrollGuard = GPScrollGuard()
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.begin(for: self)
-        super.touchesBegan(touches, with: event)
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if scrollGuard.contentScrolled {
-            super.touchesCancelled(touches, with: event)
-        } else {
-            super.touchesEnded(touches, with: event)
-        }
-        scrollGuard.reset()
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.reset()
-        super.touchesCancelled(touches, with: event)
-    }
 }
 
-/// The same scroll-safety for buttons (same overrides as
-/// GPGuardedControl — Swift gives the two UIKit base classes no
-/// shared implementation point).
+/// Buttons: plain UIButton inside a GPScrollView.
 class GPGuardedButton: UIButton {
-    private let scrollGuard = GPScrollGuard()
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.begin(for: self)
-        super.touchesBegan(touches, with: event)
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if scrollGuard.contentScrolled {
-            super.touchesCancelled(touches, with: event)
-        } else {
-            super.touchesEnded(touches, with: event)
-        }
-        scrollGuard.reset()
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        scrollGuard.reset()
-        super.touchesCancelled(touches, with: event)
-    }
 }
 
 // MARK: - Buttons

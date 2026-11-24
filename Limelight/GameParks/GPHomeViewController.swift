@@ -241,9 +241,12 @@ final class GPHomeViewController: GPBaseViewController {
     }
 
     private func rail(for host: TemporaryHost, apps: [TemporaryApp]) -> UIView {
-        let scroll = UIScrollView()
+        let scroll = GPScrollView()
         scroll.showsHorizontalScrollIndicator = false
-        scroll.delaysContentTouches = false
+        // Same delivery policy as the page scaffold: a gesture
+        // that becomes a scroll is never delivered to a poster,
+        // or is cancelled inside it. See GPScrollView.
+        scroll.delaysContentTouches = true
         scroll.delegate = self
         railScrollViews.removeAll { $0.superview == nil }
         railScrollViews.append(scroll)
