@@ -250,7 +250,7 @@ final class GPEngine: NSObject {
     func refreshAppList(_ host: TemporaryHost) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.discoveryManager?.pauseDiscovery(for: host)
-            let response = ConnectionHelper.getAppListForHost(host)
+            let response = ConnectionHelper.getAppList(for: host)
             self?.discoveryManager?.resumeDiscovery(for: host)
 
             DispatchQueue.main.async {
