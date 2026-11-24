@@ -316,19 +316,12 @@ final class GPEngine: NSObject {
     /// Creates the engine's stream view controller for an app, ready to
     /// be pushed. The connecting screen owns the presentation so it can
     /// replace itself in the navigation stack.
-    func makeStreamViewController(for app: TemporaryApp) -> StreamFrameViewController? {
+    func makeStreamViewController(for app: TemporaryApp) -> UIViewController? {
         guard let host = app.host, host.pairState == .paired else {
             return nil
         }
         let config = GPStreamConfigBuilder.configForApp(app)
-        let storyboardName = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
-        let storyboard = UIStoryboard(name: storyboardName, bundle: nil)
-        guard let streamVC = storyboard.instantiateViewController(withIdentifier: "streamFrame") as? StreamFrameViewController else {
-            return nil
-        }
-        streamVC.streamConfig = config
-        streamVC.hidesBottomBarWhenPushed = true
-        return streamVC
+        return GPStreamLauncher.streamViewController(withConfig: config)
     }
 
     /// Records the start of a stream so its session lands in Stats

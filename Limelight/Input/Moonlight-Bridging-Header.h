@@ -18,5 +18,5 @@
 #import "WakeOnLanManager.h"
 #import "CryptoManager.h"
 #import "IdManager.h"
-#import "StreamFrameViewController.h"
 #import "GPStreamConfigBuilder.h"
+#import "GPStreamLauncher.h"
