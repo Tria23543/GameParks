@@ -177,8 +177,8 @@ enum GPCatalog {
         if let cached = boxArtCache.object(forKey: key) {
             return cached
         }
-        let path = AppAssetManager.boxArtPath(for: app)
-        guard FileManager.default.fileExists(atPath: path),
+        guard let path = AppAssetManager.boxArtPath(for: app),
+              FileManager.default.fileExists(atPath: path),
               !boxArtRequested.contains(key) else { return nil }
         boxArtRequested.insert(key)
         let host = app.host
