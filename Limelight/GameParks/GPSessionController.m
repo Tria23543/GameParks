@@ -268,11 +268,15 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     [_scanner scanWithDiscoveryManager:_discMan onHost:^(TemporaryHost *host) {
         [weakSelf adoptScannedHost:host];
     } completion:^(BOOL completed) {
-        weakSelf->_scanInProgress = NO;
+        GPSessionController *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        strongSelf->_scanInProgress = NO;
         if (!completed) {
             // A superseded/cancelled sweep must not throttle the
             // next real attempt for the full interval.
-            weakSelf->_lastScanStart = nil;
+            strongSelf->_lastScanStart = nil;
         }
     }];
 }
