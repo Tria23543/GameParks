@@ -1,0 +1,9 @@
+**/xcuserdata/
+**/Moonlight.xcscmblueprint
+**/xcschemes/*.xcscheme
+.DS_Store
+Build
+DerivedData
+
+# GameParks: the shared scheme must stay committed (CI builds with it)
+!**/xcschemes/GameParks.xcscheme

@@ -1,0 +1,44 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Check out GameParks (with engine submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build GameParks (Release, iphoneos, no signing)
+        run: |
+          xcodebuild \
+            -project Moonlight.xcodeproj \
+            -scheme GameParks \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -n 1)
+          echo "Packaging $APP_PATH"
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r -y GameParks-unsigned.ipa Payload
+          ls -lh GameParks-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameParks-unsigned-ipa
+          path: GameParks-unsigned.ipa
+          if-no-files-found: error
