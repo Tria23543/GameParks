@@ -19,16 +19,19 @@ jobs:
         with:
           submodules: recursive
 
-      # A-108: pin the toolchain to the newest Xcode on the runner
-      # instead of silently inheriting the runner image's default.
-      - name: Select newest Xcode available
+      # A-108: pin the toolchain explicitly instead of silently inheriting
+      # the runner image's default. Constrained to the Xcode 16 line this
+      # project builds with (v2.0–v2.4 all built on 16.x / iphoneos18.5):
+      # an unconstrained "newest" pick selected Xcode 26.3 in run
+      # 45481380299 and its SDK could not resolve even UIKit/Foundation.
+      - name: Select Xcode 16 (project toolchain)
         run: |
-          XCODE_APP=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1)
+          XCODE_APP=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
           if [ -n "$XCODE_APP" ]; then
             echo "Selecting $XCODE_APP"
             sudo xcode-select -s "$XCODE_APP/Contents/Developer"
           else
-            echo "No Xcode_*.app found; using the runner default"
+            echo "No Xcode_16*.app found; using the runner default"
           fi
           xcodebuild -version
 
