@@ -246,7 +246,11 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         return;
     }
     for (TemporaryApp *app in host.appList) {
-        if (![[NSFileManager defaultManager] fileExistsAtPath:[AppAssetManager boxArtPathForApp:app]]) {
+        // GP v2.6 (B-21): resolve the path from the explicit host this
+        // method was given, not from app.host — the retriever writes
+        // via the explicit host, so the missing check must look in
+        // the same directory it writes to.
+        if (![[NSFileManager defaultManager] fileExistsAtPath:[AppAssetManager boxArtPathForApp:app host:host]]) {
             [_assetManager stopRetrieving];
             [_assetManager retrieveAssetsFromHost:host];
             return;
@@ -787,6 +791,19 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
 #pragma mark - App list (upstream: alreadyPaired + updateApplist:forHost:)
 
 - (void)fetchAppListForHost:(TemporaryHost *)host {
+    // GP v2.5 (A-11): coalesce concurrent app-list fetches per host.
+    // GP v2.6 (B-33): the coalescing check now comes FIRST — in v2.5
+    // the cached-list block below ran before it, so every coalesced
+    // duplicate caller still stop+restarted the host's box-art
+    // retrieval even though its network fetch was coalesced away.
+    NSString *fetchKey = [self hostKeyForHost:host];
+    @synchronized (_fetchInFlight) {
+        if ([_fetchInFlight containsObject:fetchKey]) {
+            return;
+        }
+        [_fetchInFlight addObject:fetchKey];
+    }
+
     // Serve the cached list immediately when we have one (upstream).
     if (host.appList.count > 0) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -796,15 +813,6 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
             [self->_assetManager stopRetrieving];
             [self->_assetManager retrieveAssetsFromHost:host];
         });
-    }
-
-    // GP v2.5 (A-11): coalesce concurrent app-list fetches per host.
-    NSString *fetchKey = [self hostKeyForHost:host];
-    @synchronized (_fetchInFlight) {
-        if ([_fetchInFlight containsObject:fetchKey]) {
-            return;
-        }
-        [_fetchInFlight addObject:fetchKey];
     }
     NSUInteger generation = [self generationForHostKey:fetchKey];
 
@@ -905,6 +913,11 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
         for (TemporaryApp *savedApp in newHostAppList) {
             if ([app.id isEqualToString:savedApp.id]) {
                 savedApp.name = app.name;
+                // GP v2.6 (B-21): also refresh the saved app's host —
+                // a stale/duplicate host object here is what made the
+                // read side look for box art under a different host
+                // directory than the retriever wrote to.
+                savedApp.host = host;
                 savedApp.hdrSupported = app.hdrSupported;
                 // Don't propagate hidden, because we want the local data to prevail
                 appAlreadyInList = YES;
