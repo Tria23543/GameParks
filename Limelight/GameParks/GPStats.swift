@@ -49,6 +49,12 @@ final class GPStats {
     // the record list can never shrink them.
     private var lifetimeSeconds: TimeInterval = 0
     private var lifetimeSessions: Int = 0
+    /// A-46: lifetime streamed bits and per-game lifetime seconds,
+    /// in the same pruning-proof aggregates — the "Est. streamed
+    /// data" tile and the per-game totals must not shrink when the
+    /// record list is pruned either.
+    private var lifetimeStreamedBits: Double = 0
+    private var lifetimePerGame: [String: (name: String, seconds: TimeInterval)] = [:]
 
     private init() {
         records = Self.load()
@@ -73,7 +79,7 @@ final class GPStats {
         activeBitrateKbps = max(bitrateKbps, 1)
         activeAccumulated = 0
         activeStretchStartUptime = ProcessInfo.processInfo.systemUptime
-        persistActiveSession(heartbeat: Date())
+        persistActiveSession()
         startHeartbeat()
     }
 
@@ -109,6 +115,11 @@ final class GPStats {
         records.append(record)
         lifetimeSeconds += record.duration
         lifetimeSessions += 1
+        lifetimeStreamedBits += record.duration * Double(record.bitrateKbps) * 1000.0
+        var gameEntry = lifetimePerGame[record.appKey] ?? (name: record.appName, seconds: 0)
+        gameEntry.seconds += record.duration
+        gameEntry.name = record.appName
+        lifetimePerGame[record.appKey] = gameEntry
         saveAggregates()
         // Keep the store bounded and reasonably recent. Pruning
         // touches only the record list, never the aggregates above.
@@ -126,9 +137,7 @@ final class GPStats {
         guard hasActiveSession, let stretchStart = activeStretchStartUptime else { return }
         activeAccumulated += ProcessInfo.processInfo.systemUptime - stretchStart
         activeStretchStartUptime = nil
-        if let start = activeStart {
-            persistActiveSession(heartbeat: start.addingTimeInterval(activeAccumulated))
-        }
+        persistActiveSession()
     }
 
     @objc private func appDidBecomeActive() {
@@ -138,11 +147,18 @@ final class GPStats {
 
     // MARK: - Active-session persistence (A-15)
 
-    private func persistActiveSession(heartbeat: Date) {
+    /// B-10: the persisted record carries the pause-aware
+    /// accumulated duration itself, not just a wall-clock
+    /// heartbeat — reconciliation credits `accumulated`, so time
+    /// spent backgrounded/locked is never counted. The wall-clock
+    /// heartbeat is kept only as a legacy fallback for records
+    /// written before `accumulated` existed.
+    private func persistActiveSession() {
         guard let key = activeKey, let name = activeName, let start = activeStart else { return }
         let dict: [String: Any] = ["key": key, "name": name,
                                    "start": start.timeIntervalSince1970,
-                                   "heartbeat": heartbeat.timeIntervalSince1970,
+                                   "heartbeat": Date().timeIntervalSince1970,
+                                   "accumulated": currentAccumulatedDuration(),
                                    "bitrate": activeBitrateKbps]
         UserDefaults.standard.set(dict, forKey: activeSessionKey)
     }
@@ -151,7 +167,7 @@ final class GPStats {
         stopHeartbeat()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             guard let self = self, self.hasActiveSession else { return }
-            self.persistActiveSession(heartbeat: Date())
+            self.persistActiveSession()
         }
     }
 
@@ -172,7 +188,15 @@ final class GPStats {
               let bitrate = dict["bitrate"] as? Int else {
             return
         }
-        let duration = max(heartbeatTs - startTs, 0)
+        // B-10: credit the pause-aware accumulated duration the
+        // heartbeat persisted; wall-clock elapsed is only the
+        // fallback for pre-B-10 records that never stored it.
+        let duration: TimeInterval
+        if let accumulated = dict["accumulated"] as? Double {
+            duration = max(accumulated, 0)
+        } else {
+            duration = max(heartbeatTs - startTs, 0)
+        }
         guard duration >= 1 else { return }
         appendRecord(GPSessionRecord(appKey: key, appName: name,
                                      start: Date(timeIntervalSince1970: startTs),
@@ -191,14 +215,17 @@ final class GPStats {
         lifetimeSessions
     }
 
-    /// Estimated from each session's duration × its bitrate.
+    /// Estimated from each session's duration × its bitrate,
+    /// accumulated into the lifetime aggregates (A-46) so pruning
+    /// the record list never shrinks it.
     var totalStreamedGB: Double {
-        let bits = records.reduce(0.0) { $0 + $1.duration * Double($1.bitrateKbps) * 1000.0 }
-        return bits / 8.0 / 1_000_000_000.0
+        return lifetimeStreamedBits / 8.0 / 1_000_000_000.0
     }
 
+    /// A-46: per-game playtime reads the lifetime per-game
+    /// aggregates, not the pruned record list.
     func seconds(forAppKey key: String) -> TimeInterval {
-        records.filter { $0.appKey == key }.reduce(0) { $0 + $1.duration }
+        return lifetimePerGame[key]?.seconds ?? 0
     }
 
     func lastPlayed(forAppKey key: String) -> Date? {
@@ -210,15 +237,10 @@ final class GPStats {
     }
 
     /// (appKey, appName, seconds) sorted by playtime, longest first.
+    /// A-46: sourced from the lifetime per-game aggregates so the
+    /// list survives record pruning like the headline tiles.
     func mostPlayed(limit: Int = 4) -> [(key: String, name: String, seconds: TimeInterval)] {
-        var totals: [String: (name: String, seconds: TimeInterval)] = [:]
-        for record in records {
-            var entry = totals[record.appKey] ?? (name: record.appName, seconds: 0)
-            entry.seconds += record.duration
-            entry.name = record.appName
-            totals[record.appKey] = entry
-        }
-        return totals
+        return lifetimePerGame
             .map { (key: $0.key, name: $0.value.name, seconds: $0.value.seconds) }
             .sorted { $0.seconds > $1.seconds }
             .prefix(limit)
@@ -253,18 +275,54 @@ final class GPStats {
            let sessions = dict["totalSessions"] as? Int {
             lifetimeSeconds = seconds
             lifetimeSessions = sessions
+            // A-46: streamed-bits / per-game aggregates added later;
+            // when an older aggregates record lacks them, seed them
+            // from the records still on disk (best available —
+            // already-pruned history cannot be recovered).
+            if let bits = dict["totalStreamedBits"] as? Double,
+               let perGame = dict["perGame"] as? [[String: Any]] {
+                lifetimeStreamedBits = bits
+                lifetimePerGame = [:]
+                for entry in perGame {
+                    if let key = entry["key"] as? String,
+                       let name = entry["name"] as? String,
+                       let gameSeconds = entry["seconds"] as? Double {
+                        lifetimePerGame[key] = (name: name, seconds: gameSeconds)
+                    }
+                }
+            } else {
+                seedStreamedAndPerGameFromRecords()
+                saveAggregates()
+            }
         } else {
             // First run with aggregates: seed them from the records
             // on disk so existing history keeps its totals.
             lifetimeSeconds = records.reduce(0) { $0 + $1.duration }
             lifetimeSessions = records.count
+            seedStreamedAndPerGameFromRecords()
             saveAggregates()
         }
     }
 
+    private func seedStreamedAndPerGameFromRecords() {
+        lifetimeStreamedBits = records.reduce(0.0) { $0 + $1.duration * Double($1.bitrateKbps) * 1000.0 }
+        lifetimePerGame = [:]
+        for record in records {
+            var entry = lifetimePerGame[record.appKey] ?? (name: record.appName, seconds: 0)
+            entry.seconds += record.duration
+            entry.name = record.appName
+            lifetimePerGame[record.appKey] = entry
+        }
+    }
+
     private func saveAggregates() {
+        let perGame: [[String: Any]] = lifetimePerGame.map {
+            ["key": $0.key, "name": $0.value.name, "seconds": $0.value.seconds]
+        }
         UserDefaults.standard.set(["totalSeconds": lifetimeSeconds,
-                                   "totalSessions": lifetimeSessions], forKey: aggregatesKey)
+                                   "totalSessions": lifetimeSessions,
+                                   "totalStreamedBits": lifetimeStreamedBits,
+                                   "perGame": perGame], forKey: aggregatesKey)
     }
 
     private static func load() -> [GPSessionRecord] {

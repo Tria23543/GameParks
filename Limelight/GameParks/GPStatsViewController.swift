@@ -25,7 +25,9 @@ final class GPStatsViewController: GPBaseViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        performContentRebuild()
+        // B-17 (A-31 residual): appearance goes through the
+        // scroll-safe path like the other tab roots.
+        requestContentRebuild()
     }
 
     override func rebuildContent() {
