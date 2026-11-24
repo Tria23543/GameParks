@@ -75,6 +75,6 @@ final class GPTabBarController: UITabBarController, UINavigationControllerDelega
             return
         }
         GPStats.shared.endSession()
-        GPSessionController.shared.noteStreamEnded()
+        GPSessionController.shared().noteStreamEnded()
     }
 }

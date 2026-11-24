@@ -12,6 +12,8 @@
 import UIKit
 
 final class GPLibraryViewController: GPBaseViewController {
+    private var session: GPSessionController { GPSessionController.shared() }
+
     private enum Filter {
         case all, big, classics, favourites
     }
@@ -74,9 +76,9 @@ final class GPLibraryViewController: GPBaseViewController {
         contentStack.addArrangedSubview(dynamicStack)
 
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPHostsChangedNotification, object: nil)
+                                               name: .GPHostsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPAppListChangedNotification, object: nil)
+                                               name: .GPAppListChanged, object: nil)
         refreshChips()
         rebuild()
     }
@@ -124,7 +126,7 @@ final class GPLibraryViewController: GPBaseViewController {
 
     private func rebuild() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
 
         guard let host = session.selectedHost ?? session.hosts.first else {
             subtitleLabel.text = "No PC yet"
@@ -201,7 +203,7 @@ final class GPLibraryViewController: GPBaseViewController {
     // MARK: - Actions — navigation first
 
     @objc private func appRowTapped(_ sender: GPAppRow) {
-        guard let host = GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first,
+        guard let host = GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first,
               let key = sender.accessibilityIdentifier,
               let app = GPCatalog.sortedApps(for: host).first(where: { GPCatalog.appKey(host: host, app: $0) == key })
         else { return }
@@ -215,12 +217,12 @@ final class GPLibraryViewController: GPBaseViewController {
     }
 
     @objc private func openHostPage() {
-        guard let host = GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first else { return }
+        guard let host = GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first else { return }
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
     }
 
     @objc private func retryAppList() {
-        guard let host = GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first else { return }
-        GPSessionController.shared.fetchAppList(for: host)
+        guard let host = GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first else { return }
+        GPSessionController.shared().fetchAppList(for: host)
     }
 }

@@ -12,6 +12,8 @@
 import UIKit
 
 final class GPHomeViewController: GPBaseViewController {
+    private var session: GPSessionController { GPSessionController.shared() }
+
     private let dynamicStack = UIStackView()
     private let refreshControl = UIRefreshControl()
 
@@ -31,9 +33,9 @@ final class GPHomeViewController: GPBaseViewController {
         scrollView.refreshControl = refreshControl
 
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPHostsChangedNotification, object: nil)
+                                               name: .GPHostsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPAppListChangedNotification, object: nil)
+                                               name: .GPAppListChanged, object: nil)
         rebuild()
     }
 
@@ -47,7 +49,7 @@ final class GPHomeViewController: GPBaseViewController {
     }
 
     @objc private func pulledToRefresh() {
-        GPSessionController.shared.rescanLocalNetwork()
+        GPSessionController.shared().rescanLocalNetwork()
         // The scan reports through the normal notifications; stop
         // the spinner shortly after regardless.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
@@ -59,7 +61,7 @@ final class GPHomeViewController: GPBaseViewController {
 
     private func rebuild() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
 
         guard let host = session.selectedHost ?? session.hosts.first else {
             dynamicStack.addArrangedSubview(searchingView())
@@ -92,7 +94,7 @@ final class GPHomeViewController: GPBaseViewController {
     }
 
     private func rebuildPairedContent(for host: TemporaryHost) {
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         let apps = GPCatalog.sortedApps(for: host)
 
         if apps.isEmpty {
@@ -199,7 +201,7 @@ final class GPHomeViewController: GPBaseViewController {
         }
         card.stack.addArrangedSubview(gpLabel(statusText, font: GPFont.body(13), color: GPColor.textSecondary, lines: 1))
 
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         if host.state == .online, session.lastPingMs(for: host) >= 0 {
             card.stack.addArrangedSubview(gpLabel("\(session.lastPingMs(for: host)) ms", font: GPFont.body(12, weight: .semibold), color: GPColor.accent, lines: 1))
         }
@@ -271,9 +273,9 @@ final class GPHomeViewController: GPBaseViewController {
     // MARK: - Actions — navigation is always the first thing
 
     @objc private func hostCardTapped() {
-        guard let host = GPSessionController.shared.selectedHost
-                ?? GPSessionController.shared.hosts.first else { return }
-        GPSessionController.shared.selectHost(host)
+        guard let host = GPSessionController.shared().selectedHost
+                ?? GPSessionController.shared().hosts.first else { return }
+        GPSessionController.shared().selectHost(host)
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
     }
 
@@ -302,11 +304,11 @@ final class GPHomeViewController: GPBaseViewController {
 
     @objc private func retryAppList() {
         guard let host = currentHost() else { return }
-        GPSessionController.shared.fetchAppList(for: host)
+        GPSessionController.shared().fetchAppList(for: host)
     }
 
     @objc private func searchAgainTapped() {
-        GPSessionController.shared.rescanLocalNetwork()
+        GPSessionController.shared().rescanLocalNetwork()
     }
 
     @objc private func addByAddressTapped() {
@@ -316,7 +318,7 @@ final class GPHomeViewController: GPBaseViewController {
     // MARK: - Helpers
 
     private func currentHost() -> TemporaryHost? {
-        return GPSessionController.shared.selectedHost ?? GPSessionController.shared.hosts.first
+        return GPSessionController.shared().selectedHost ?? GPSessionController.shared().hosts.first
     }
 
     private func mostRecentApp(for host: TemporaryHost) -> TemporaryApp? {

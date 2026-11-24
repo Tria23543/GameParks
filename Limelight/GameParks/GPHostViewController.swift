@@ -12,6 +12,8 @@ import UIKit
 import GameController
 
 final class GPHostViewController: GPBaseViewController {
+    private var session: GPSessionController { GPSessionController.shared() }
+
     private let hostUUID: String
     private var host: TemporaryHost
     private let dynamicStack = UIStackView()
@@ -33,11 +35,11 @@ final class GPHostViewController: GPBaseViewController {
         contentStack.addArrangedSubview(dynamicStack)
 
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPHostsChangedNotification, object: nil)
+                                               name: .GPHostsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPAppListChangedNotification, object: nil)
+                                               name: .GPAppListChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(hostInfoError(_:)),
-                                               name: GPHostInfoErrorNotification, object: nil)
+                                               name: .GPHostInfoError, object: nil)
         rebuild()
     }
 
@@ -46,11 +48,11 @@ final class GPHostViewController: GPBaseViewController {
         // Entering the PC page is the natural refresh point — the
         // same work upstream does when a host is tapped, done here
         // on the destination screen instead of blocking the tap.
-        GPSessionController.shared.activateHost(host, userInitiated: false, skipFastPath: false)
+        GPSessionController.shared().activateHost(host, userInitiated: false, skipFastPath: false)
     }
 
     @objc private func stateChanged() {
-        if let current = GPSessionController.shared.hosts.first(where: { $0.uuid == hostUUID }) {
+        if let current = GPSessionController.shared().hosts.first(where: { $0.uuid == hostUUID }) {
             host = current
         }
         rebuild()
@@ -69,7 +71,7 @@ final class GPHostViewController: GPBaseViewController {
 
     private func rebuild() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
 
         // Status card
         let statusCard = GPCardButton()
@@ -198,18 +200,18 @@ final class GPHostViewController: GPBaseViewController {
     // MARK: - Actions
 
     @objc private func pairTapped() {
-        GPSessionController.shared.selectHost(host)
+        GPSessionController.shared().selectHost(host)
         present(GPPairingViewController(host: host), animated: true)
     }
 
     @objc private func wakeTapped() {
-        GPSessionController.shared.wakeHost(host)
+        GPSessionController.shared().wakeHost(host)
         presentAlert(title: "Wake-up sent",
                      message: "A wake-up packet was sent to \(host.name ?? "your PC"). Give it a few moments, then this page updates by itself when the PC answers.")
     }
 
     @objc private func reconnectTapped() {
-        GPSessionController.shared.activateHost(host, userInitiated: true, skipFastPath: true)
+        GPSessionController.shared().activateHost(host, userInitiated: true, skipFastPath: true)
     }
 
     @objc private func addGameTapped() {
@@ -224,7 +226,7 @@ final class GPHostViewController: GPBaseViewController {
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
             guard let self = self else { return }
-            GPSessionController.shared.removeHost(self.host)
+            GPSessionController.shared().removeHost(self.host)
             self.navigationController?.popViewController(animated: true)
         })
         present(alert, animated: true)
@@ -247,6 +249,6 @@ final class GPHostViewController: GPBaseViewController {
     }
 
     @objc private func retryAppList() {
-        GPSessionController.shared.fetchAppList(for: host)
+        GPSessionController.shared().fetchAppList(for: host)
     }
 }

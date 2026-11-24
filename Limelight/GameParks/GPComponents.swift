@@ -118,7 +118,7 @@ class GPBaseViewController: UIViewController {
                 self.presentAlert(title: "Invalid address", message: "Enter the PC's IP address, for example 192.168.1.100.")
                 return
             }
-            GPSessionController.shared.addHost(atAddress: address) { success, error in
+            GPSessionController.shared().addHost(atAddress: address) { success, error in
                 if !success {
                     self.presentAlert(title: "PC not found",
                                       message: error ?? "No GameStream PC answered at that address. Check the address and that Sunshine is running.")

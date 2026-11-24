@@ -93,6 +93,8 @@ enum GPSettingsStore {
 }
 
 final class GPSettingsViewController: GPBaseViewController {
+    private var session: GPSessionController { GPSessionController.shared() }
+
     private let dynamicStack = UIStackView()
 
     override func viewDidLoad() {
@@ -101,7 +103,7 @@ final class GPSettingsViewController: GPBaseViewController {
         dynamicStack.spacing = 16
         contentStack.addArrangedSubview(dynamicStack)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPHostsChangedNotification, object: nil)
+                                               name: .GPHostsChanged, object: nil)
         rebuild()
     }
 
@@ -122,7 +124,7 @@ final class GPSettingsViewController: GPBaseViewController {
         }
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         let host = session.selectedHost ?? session.hosts.first
         let subtitle = host != nil && host!.pairState == .paired
             ? "GameParks · paired to \(host!.name ?? "your PC")"
@@ -244,8 +246,8 @@ final class GPSettingsViewController: GPBaseViewController {
 
     @objc private func hostRowTapped(_ sender: GPRow) {
         guard let uuid = sender.accessibilityIdentifier,
-              let host = GPSessionController.shared.hosts.first(where: { $0.uuid == uuid }) else { return }
-        GPSessionController.shared.selectHost(host)
+              let host = GPSessionController.shared().hosts.first(where: { $0.uuid == uuid }) else { return }
+        GPSessionController.shared().selectHost(host)
         navigationController?.pushViewController(GPHostViewController(host: host), animated: true)
     }
 

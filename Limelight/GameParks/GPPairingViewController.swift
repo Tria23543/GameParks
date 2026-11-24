@@ -75,7 +75,7 @@ final class GPPairingViewController: UIViewController {
             closeButton.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
 
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         session.onPairingPIN = { [weak self] pin in
             self?.showPIN(pin)
         }
@@ -87,14 +87,14 @@ final class GPPairingViewController: UIViewController {
         // server-info re-check inside activation can find the PC
         // already paired, or fail to reach it at all.
         NotificationCenter.default.addObserver(self, selector: #selector(hostsChanged),
-                                               name: GPHostsChangedNotification, object: nil)
+                                               name: .GPHostsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(hostInfoError(_:)),
-                                               name: GPHostInfoErrorNotification, object: nil)
+                                               name: .GPHostInfoError, object: nil)
     }
 
     @objc private func hostsChanged() {
         guard !finished,
-              let current = GPSessionController.shared.hosts.first(where: { $0.uuid == host.uuid }),
+              let current = GPSessionController.shared().hosts.first(where: { $0.uuid == host.uuid }),
               current.pairState == .paired else {
             return
         }
@@ -114,7 +114,7 @@ final class GPPairingViewController: UIViewController {
         super.viewDidAppear(animated)
         // Kick the flow off only once we're on screen, so the PIN
         // (delivered synchronously by the engine) has somewhere to go.
-        GPSessionController.shared.pairSelectedHost()
+        GPSessionController.shared().pairSelectedHost()
     }
 
     private func showPIN(_ pin: String) {
@@ -144,7 +144,7 @@ final class GPPairingViewController: UIViewController {
     }
 
     @objc private func cancelTapped() {
-        GPSessionController.shared.cancelPairing()
+        GPSessionController.shared().cancelPairing()
         cleanupAndDismiss()
     }
 
@@ -153,7 +153,7 @@ final class GPPairingViewController: UIViewController {
     }
 
     private func cleanupAndDismiss() {
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         session.onPairingPIN = nil
         session.onPairingResult = nil
         dismiss(animated: true)

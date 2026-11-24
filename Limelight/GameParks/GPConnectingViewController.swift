@@ -14,6 +14,8 @@ import UIKit
 import GameController
 
 final class GPConnectingViewController: GPBaseViewController {
+    private var session: GPSessionController { GPSessionController.shared() }
+
     private enum StepState {
         case pending, active, done, warning, failed
     }
@@ -50,7 +52,7 @@ final class GPConnectingViewController: GPBaseViewController {
             : "1080p60"
         let stepTitles = [
             "Waking \(host.name ?? "your PC")",
-            GPSessionController.shared.runningApp(for: host)?.id == app.id ? "Resuming the game" : "Starting the game",
+            GPSessionController.shared().runningApp(for: host)?.id == app.id ? "Resuming the game" : "Starting the game",
             "Negotiating stream · \(streamSummary)",
             "Controller connected",
         ]
@@ -200,7 +202,7 @@ final class GPConnectingViewController: GPBaseViewController {
             return
         }
         setStep(0, state: .active)
-        GPSessionController.shared.wakeHost(host)
+        GPSessionController.shared().wakeHost(host)
         pollForWake()
     }
 
@@ -214,7 +216,7 @@ final class GPConnectingViewController: GPBaseViewController {
         }
         // One silent server-info round trip per poll — the same
         // activation the host page uses, minus pairing.
-        GPSessionController.shared.activateHost(host, userInitiated: false, skipFastPath: true)
+        GPSessionController.shared().activateHost(host, userInitiated: false, skipFastPath: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self = self, !self.cancelled else { return }
             self.refreshHost()
@@ -233,7 +235,7 @@ final class GPConnectingViewController: GPBaseViewController {
         // One fresh server-info round trip so the running-game
         // state is current before we launch (upstream fetches it
         // in its host-tap flow for the same reason).
-        GPSessionController.shared.activateHost(host, userInitiated: false, skipFastPath: true)
+        GPSessionController.shared().activateHost(host, userInitiated: false, skipFastPath: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
             guard let self = self, !self.cancelled else { return }
             self.refreshHost()
@@ -250,7 +252,7 @@ final class GPConnectingViewController: GPBaseViewController {
     private func stepNegotiate() {
         guard !cancelled else { return }
         setStep(2, state: .active)
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         guard let streamVC = session.streamViewController(for: app) else {
             setStep(2, state: .failed)
             showFailure(message: "The stream couldn't be set up for \(app.name ?? "this game"). Try again, or restart Sunshine on the PC.")
@@ -279,12 +281,12 @@ final class GPConnectingViewController: GPBaseViewController {
         GPStats.shared.beginSession(appKey: GPCatalog.appKey(host: host, app: app),
                                     appName: app.name ?? "Game",
                                     bitrateKbps: settings?.bitrate?.intValue ?? 20000)
-        GPSessionController.shared.noteStreamStarted()
+        GPSessionController.shared().noteStreamStarted()
         navigationController?.pushViewController(streamVC, animated: true)
     }
 
     private func refreshHost() {
-        if let current = GPSessionController.shared.hosts.first(where: { $0.uuid == hostUUID }) {
+        if let current = GPSessionController.shared().hosts.first(where: { $0.uuid == hostUUID }) {
             host = current
         }
     }

@@ -12,6 +12,8 @@
 import UIKit
 
 final class GPGameViewController: GPBaseViewController {
+    private var session: GPSessionController { GPSessionController.shared() }
+
     private let hostUUID: String
     private let appID: String
     private var host: TemporaryHost
@@ -39,9 +41,9 @@ final class GPGameViewController: GPBaseViewController {
         contentStack.addArrangedSubview(dynamicStack)
 
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPHostsChangedNotification, object: nil)
+                                               name: .GPHostsChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(stateChanged),
-                                               name: GPAppListChangedNotification, object: nil)
+                                               name: .GPAppListChanged, object: nil)
         rebuild()
     }
 
@@ -51,7 +53,7 @@ final class GPGameViewController: GPBaseViewController {
     }
 
     @objc private func stateChanged() {
-        if let currentHost = GPSessionController.shared.hosts.first(where: { $0.uuid == hostUUID }) {
+        if let currentHost = GPSessionController.shared().hosts.first(where: { $0.uuid == hostUUID }) {
             host = currentHost
             if let currentApp = GPCatalog.sortedApps(for: currentHost).first(where: { $0.id == appID }) {
                 app = currentApp
@@ -64,7 +66,7 @@ final class GPGameViewController: GPBaseViewController {
 
     private func rebuild() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         let info = GPCatalog.info(for: app)
         let key = GPCatalog.appKey(host: host, app: app)
 
@@ -195,7 +197,7 @@ final class GPGameViewController: GPBaseViewController {
     // MARK: - Actions
 
     @objc private func playTapped() {
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
         guard let running = session.runningApp(for: host) else {
             pushConnecting(app: app)
             return
@@ -213,7 +215,7 @@ final class GPGameViewController: GPBaseViewController {
         })
         sheet.addAction(UIAlertAction(title: "Quit and start \(app.name ?? "this game")", style: .destructive) { [weak self] _ in
             guard let self = self else { return }
-            GPSessionController.shared.quitApp(running, onHost: self.host) { success in
+            GPSessionController.shared().quitApp(running, onHost: self.host) { success in
                 if success {
                     self.pushConnecting(app: self.app)
                 } else {

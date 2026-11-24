@@ -9,6 +9,8 @@
 import UIKit
 
 final class GPStatsViewController: GPBaseViewController {
+    private var session: GPSessionController { GPSessionController.shared() }
+
     private let dynamicStack = UIStackView()
 
     override func viewDidLoad() {
@@ -29,7 +31,7 @@ final class GPStatsViewController: GPBaseViewController {
     private func rebuild() {
         dynamicStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let stats = GPStats.shared
-        let session = GPSessionController.shared
+        let session = GPSessionController.shared()
 
         if stats.sessionCount == 0 {
             let message = GPMessageView()
