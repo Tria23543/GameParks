@@ -46,6 +46,25 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
     _pcUuidToLoad = (NSString*)[shortcutItem.userInfo objectForKey:@"UUID"];
     _shortcutCompletionHandler = completionHandler;
 }
+
+// GameParks: orientation follows the visible screen — the GameParks UI
+// is portrait-only, the stream screen is landscape. The app's root is a
+// navigation controller holding the whole GameParks flow, so resolve
+// the top view controller (through any presented controller) and use
+// its mask. Without this, the Info.plist value rules every screen.
+- (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
+    UIViewController* vc = window.rootViewController;
+    while (vc.presentedViewController != nil) {
+        vc = vc.presentedViewController;
+    }
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        vc = [(UINavigationController*)vc topViewController];
+    }
+    if (vc != nil) {
+        return [vc supportedInterfaceOrientations];
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
 #endif
 
 - (void)applicationWillResignActive:(UIApplication *)application

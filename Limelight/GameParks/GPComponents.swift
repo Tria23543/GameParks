@@ -260,6 +260,18 @@ class GPBaseViewController: UIViewController {
         view.backgroundColor = GPTheme.bg
     }
 
+    // GameParks screens are portrait-only (the approved design is a
+    // portrait phone UI). Only the stream screen is landscape; the app
+    // delegate asks the top view controller for its mask, so returning
+    // .portrait here locks every GameParks screen to portrait.
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        return .portrait
+    }
+
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        return .portrait
+    }
+
     /// The root navigation controller GameParks pushes streams and pages onto.
     var gpNavigationController: UINavigationController? {
         return navigationController

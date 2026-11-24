@@ -12,6 +12,16 @@ import UIKit
 final class GPTabBarController: UITabBarController, UINavigationControllerDelegate {
     private var pairingAlert: UIAlertController?
 
+    // The tab bar itself takes the selected tab's orientation mask —
+    // every tab root is a GameParks screen, so this is portrait.
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        return selectedViewController?.supportedInterfaceOrientations ?? .portrait
+    }
+
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        return selectedViewController?.preferredInterfaceOrientationForPresentation ?? .portrait
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = GPTheme.bg

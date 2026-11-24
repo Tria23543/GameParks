@@ -56,10 +56,24 @@
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
-    
+
 #if !TARGET_OS_TV
     [[self revealViewController] setPrimaryViewController:self];
 #endif
+}
+
+// GameParks: the stream is landscape-only. Every other screen in the
+// app is portrait; the app delegate resolves the top view controller's
+// mask, so these two methods are what switch the app to landscape for
+// the duration of a stream.
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations
+{
+    return UIInterfaceOrientationMaskLandscape;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation
+{
+    return UIInterfaceOrientationLandscapeRight;
 }
 
 #if TARGET_OS_TV
