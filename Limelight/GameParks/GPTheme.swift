@@ -32,7 +32,7 @@ enum GPTheme {
         case .extrabold: name = "Sora-ExtraBold"
         default: name = "Sora-SemiBold"
         }
-        return UIFont(name: name, size: size) ?? .systemFont(ofSize: size, weight: .bold)
+        return UIFont(name: name, size: size) ?? .systemFont(ofSize: size, weight: weight.systemWeight)
     }
 
     static func body(_ size: CGFloat, weight: FontWeight = .regular) -> UIFont {
@@ -73,20 +73,6 @@ extension UIView {
         layer.cornerRadius = radius
         layer.masksToBounds = true
     }
-
-    func addAccentGradient() {
-        let gradient = CAGradientLayer()
-        gradient.name = "gpAccentGradient"
-        gradient.colors = [UIColor(hex: 0x3FD8F2).cgColor, UIColor(hex: 0x2FA8C9).cgColor]
-        gradient.startPoint = CGPoint(x: 0, y: 0)
-        gradient.endPoint = CGPoint(x: 1, y: 1)
-        gradient.frame = bounds
-        layer.insertSublayer(gradient, at: 0)
-    }
-
-    func layoutAccentGradient() {
-        layer.sublayers?.first(where: { $0.name == "gpAccentGradient" })?.frame = bounds
-    }
 }
 
 func GPLabel(_ text: String, font: UIFont, color: UIColor, lines: Int = 1) -> UILabel {
@@ -102,11 +88,14 @@ func GPLabel(_ text: String, font: UIFont, color: UIColor, lines: Int = 1) -> UI
 /// Formats a duration in seconds the way the design shows playtime ("12.4 h", "24 min").
 func GPFormatPlaytime(_ seconds: TimeInterval) -> String {
     if seconds < 60 {
-        return "0 min"
+        // A real (recorded) short session must not read as zero.
+        return seconds > 0 ? "<1 min" : "0 min"
     }
     let hours = seconds / 3600.0
     if hours >= 1 {
-        return String(format: "%.1f h", hours)
+        // POSIX locale: the design's "12.4 h" must not become "12,4 h"
+        // in comma-decimal locales.
+        return String(format: "%.1f h", locale: Locale(identifier: "en_US_POSIX"), hours)
     }
     return "\(Int(seconds / 60)) min"
 }
@@ -125,6 +114,8 @@ func GPFormatLastPlayed(_ date: Date) -> String {
         return "\(days) days ago"
     }
     let formatter = DateFormatter()
-    formatter.dateFormat = "d MMM"
+    // Include the year for older dates: "12 Nov" alone cannot be
+    // told apart from the same date last year.
+    formatter.dateFormat = calendar.component(.year, from: date) == calendar.component(.year, from: Date()) ? "d MMM" : "d MMM yyyy"
     return formatter.string(from: date)
 }

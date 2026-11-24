@@ -21,8 +21,6 @@ final class GPPosterCell: UICollectionViewCell {
     private let placeholderLabel = GPLabel("", font: GPTheme.display(28, weight: .extrabold), color: GPTheme.dim)
     private let miniPlay = UILabel()
 
-    var onTap: (() -> Void)?
-
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = .clear
@@ -183,9 +181,19 @@ final class GPRow: UIControl {
     var showsToggle: Bool = false {
         didSet {
             toggle.isHidden = !showsToggle
-            chevron.isHidden = showsToggle
+            refreshChevronVisibility()
             valueLabel.isHidden = showsToggle
         }
+    }
+
+    /// Non-interactive status rows (e.g. Bluetooth controller state)
+    /// set this false: a chevron promises navigation that isn't there.
+    var showsChevron: Bool = true {
+        didSet { refreshChevronVisibility() }
+    }
+
+    private func refreshChevronVisibility() {
+        chevron.isHidden = showsToggle || !showsChevron
     }
 
     init(title: String, subtitle: String? = nil, value: String? = nil) {
@@ -227,6 +235,17 @@ final class GPRow: UIControl {
             chevron.heightAnchor.constraint(equalToConstant: 18),
             heightAnchor.constraint(greaterThanOrEqualToConstant: 58),
         ])
+
+        // Tapping anywhere on a toggle row flips its switch — the
+        // normal iOS Settings gesture. Previously only the small
+        // switch itself responded, and row taps did nothing.
+        addTarget(self, action: #selector(rowTapped), for: .touchUpInside)
+    }
+
+    @objc private func rowTapped() {
+        guard showsToggle else { return }
+        toggle.setOn(!toggle.isOn, animated: true)
+        toggle.sendActions(for: .valueChanged)
     }
 
     required init?(coder: NSCoder) {
@@ -272,11 +291,6 @@ class GPBaseViewController: UIViewController {
         return .portrait
     }
 
-    /// The root navigation controller GameParks pushes streams and pages onto.
-    var gpNavigationController: UINavigationController? {
-        return navigationController
-    }
-
     func showMessage(title: String, message: String, button: String = "OK") {
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: button, style: .default))
@@ -299,7 +313,13 @@ class GPBaseViewController: UIViewController {
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Add", style: .default) { [weak self] _ in
-            guard let address = alert.textFields?.first?.text, !address.isEmpty else { return }
+            // Trim first: a whitespace-only "address" used to sail
+            // through to a misleading "PC not found" error.
+            let address = (alert.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !address.isEmpty else {
+                self?.showMessage(title: "Invalid address", message: "Enter your PC's IP address on your home network, like 192.168.1.50 — you can find it in Sunshine on the PC.")
+                return
+            }
             GPEngine.shared.addHost(address: address) { [weak self] success, error in
                 if !success {
                     self?.showMessage(title: "PC not found", message: error ?? "No PC answered at that address. Check the address and that Sunshine is running.")
