@@ -206,8 +206,8 @@ final class GPEngine: NSObject {
                 return
             }
             let response = ServerInfoResponse()
-            let request = HttpRequest(forResponse: response,
-                                      withUrlRequest: hMan.newServerInfoRequest(false),
+            let request = HttpRequest(for: response,
+                                      with: hMan.newServerInfoRequest(false),
                                       fallbackError: 401,
                                       fallbackRequest: hMan.newHttpServerInfoRequest())
             self?.discoveryManager?.pauseDiscovery(for: host)
@@ -257,7 +257,7 @@ final class GPEngine: NSObject {
                 guard let self = self else { return }
                 if let response = response, response.isStatusOk(), let appList = response.getAppList() {
                     host.appList = appList
-                    self.dataManager.updateApps(forExistingHost: host)
+                    self.dataManager.updateApps(forExisting: host)
                     NotificationCenter.default.post(name: .gpAppListChanged, object: nil)
                     self.onAppListChanged?()
                 }
@@ -309,7 +309,7 @@ final class GPEngine: NSObject {
                 return
             }
             let response = HttpResponse()
-            let request = HttpRequest(forResponse: response, withUrlRequest: hMan.newQuitAppRequest())
+            let request = HttpRequest(for: response, with: hMan.newQuitAppRequest())
             self?.discoveryManager?.pauseDiscovery(for: host)
             hMan.executeRequestSynchronously(request)
             self?.discoveryManager?.resumeDiscovery(for: host)
