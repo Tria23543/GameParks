@@ -31,6 +31,6 @@
 // immediately before the host would be added to the discovery queue; if
 // it returns NO, the add (and its updateAllHosts side effect) is skipped
 // and the callback receives (nil, @"Discovery superseded").
-- (void) discoverHost:(NSString*)hostAddress withCallback:(void (^)(TemporaryHost*, NSString*))callback shouldAddToDiscovery:(nullable BOOL (^)(void))shouldAddToDiscovery;
+- (void) discoverHost:(NSString*)hostAddress withCallback:(void (^)(TemporaryHost*, NSString*))callback shouldAddToDiscovery:(BOOL (^)(void))shouldAddToDiscovery;
 
 @end

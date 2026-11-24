@@ -114,7 +114,7 @@ final class GPHostViewController: GPBaseViewController {
         let session = GPSessionController.shared()
 
         // A-76: header follows the freshest host object.
-        headerTitleLabel?.text = host.name ?? "Your PC"
+        headerTitleLabel?.text = (host.name as String?) ?? "Your PC"
 
         if hostUnavailable {
             let message = GPMessageView()
@@ -275,7 +275,7 @@ final class GPHostViewController: GPBaseViewController {
     @objc private func wakeTapped() {
         GPSessionController.shared().wakeHost(host)
         presentAlert(title: "Wake-up sent",
-                     message: "A wake-up packet was sent to \(host.name ?? "your PC"). Give it a few moments, then this page updates by itself when the PC answers.")
+                     message: "A wake-up packet was sent to \((host.name as String?) ?? "your PC"). Give it a few moments, then this page updates by itself when the PC answers.")
     }
 
     @objc private func reconnectTapped() {

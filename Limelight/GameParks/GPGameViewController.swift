@@ -33,7 +33,7 @@ final class GPGameViewController: GPBaseViewController {
         self.hostUUID = host.uuid ?? ""
         self.appID = app.id ?? ""
         self.appName = app.name ?? ""
-        self.hostName = host.name ?? ""
+        self.hostName = (host.name as String?) ?? ""
         super.init(nibName: nil, bundle: nil)
     }
 
