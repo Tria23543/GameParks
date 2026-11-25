@@ -263,7 +263,7 @@ final class GPHomeViewController: GPBaseViewController {
         card.appKey = key
         card.accessibilityIdentifier = key
         heroAppKey = key
-        card.stack.addArrangedSubview(gpLabel(app.name, font: GPFont.display(20, weight: .extrabold), color: GPColor.textPrimary, lines: 2))
+        let nameLabel = gpLabel(app.name, font: GPFont.display(20, weight: .extrabold), color: GPColor.textPrimary, lines: 2)
         let played = GPStats.shared.seconds(forAppKey: key)
         // B-39: lowercase only the relative forms ("today",
         // "yesterday", "2 days ago"); the absolute "12 Nov 2026"
@@ -275,7 +275,7 @@ final class GPHomeViewController: GPBaseViewController {
         let subtitle = played > 0
             ? "\(gpFormatPlaytime(played)) played · Last played \(lastPlayedDisplay)"
             : "Last played \(lastPlayedDisplay)"
-        card.stack.addArrangedSubview(gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2))
+        let subtitleLabel = gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
 
         let playPill = gpLabel("  ▶  Play  ", font: GPFont.display(14, weight: .bold), color: GPColor.onAccent, lines: 1)
         playPill.backgroundColor = GPColor.accent
@@ -284,7 +284,46 @@ final class GPHomeViewController: GPBaseViewController {
         playPill.textAlignment = .center
         let pillRow = UIStackView(arrangedSubviews: [playPill, UIView()])
         pillRow.axis = .horizontal
-        card.stack.addArrangedSubview(pillRow)
+
+        // v2.13: with cover art, the hero gains the same cover the
+        // rail posters show (GPCatalog.coverImage — same cache, same
+        // fetch behaviour), as a plain poster at the card's leading
+        // edge; the name/subtitle/Play stack moves beside it,
+        // unchanged. Without art the card is built exactly as
+        // before — no empty slot, no gap, no placeholder.
+        if let cover = GPCatalog.coverImage(for: app, host: host) {
+            let poster = UIImageView(image: cover)
+            poster.contentMode = .scaleAspectFill
+            poster.clipsToBounds = true
+            poster.layer.cornerRadius = 14
+            poster.isUserInteractionEnabled = false
+            poster.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            poster.setContentHuggingPriority(.defaultLow, for: .vertical)
+            poster.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            poster.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
+            let textStack = UIStackView(arrangedSubviews: [nameLabel, subtitleLabel, pillRow])
+            textStack.axis = .vertical
+            textStack.spacing = 6
+
+            let row = UIStackView(arrangedSubviews: [poster, textStack])
+            row.axis = .horizontal
+            row.spacing = 12
+            card.stack.addArrangedSubview(row)
+
+            NSLayoutConstraint.activate([
+                // The poster spans the text block's height and
+                // keeps GPPosterView's art proportion (height =
+                // width x 1.42); the card's height stays driven by
+                // the text block, as before.
+                poster.heightAnchor.constraint(equalTo: textStack.heightAnchor),
+                poster.widthAnchor.constraint(equalTo: poster.heightAnchor, multiplier: 1.0 / 1.42),
+            ])
+        } else {
+            card.stack.addArrangedSubview(nameLabel)
+            card.stack.addArrangedSubview(subtitleLabel)
+            card.stack.addArrangedSubview(pillRow)
+        }
 
         card.addTarget(self, action: #selector(heroCardTapped(_:)), for: .touchUpInside)
         return card
