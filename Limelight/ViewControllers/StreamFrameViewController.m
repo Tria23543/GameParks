@@ -36,6 +36,7 @@
 // GameParks v2.11: the in-stream menu (GPStreamPanelViewController,
 // Swift) reports its live effects through this delegate.
 @interface StreamFrameViewController () <GPStreamPanelDelegate>
+- (void)gpSizeMenuButton;
 @end
 #endif
 
@@ -278,7 +279,6 @@
     _menuButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
     _menuButton.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
     _menuButton.layer.cornerRadius = 22;
-    _menuButton.contentEdgeInsets = UIEdgeInsetsMake(14, 16, 14, 16);
     _menuButton.accessibilityLabel = @"Stream menu";
     [_menuButton addTarget:self action:@selector(menuButtonPressed) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_menuButton];
@@ -292,6 +292,18 @@
 }
 
 #if !TARGET_OS_TV
+// GameParks v2.11: size the menu pill to the exit pill's 44 pt
+// height with the same 16 pt side padding, by frame — reusing the
+// exit pill's contentEdgeInsets would add a second instance of
+// that property's deprecation warning to the build.
+- (void)gpSizeMenuButton {
+    [_menuButton sizeToFit];
+    CGRect frame = _menuButton.frame;
+    frame.size.height = 44;
+    frame.size.width += 32;
+    _menuButton.frame = frame;
+}
+
 - (void)menuButtonPressed {
     // Tapping the hamburger with the menu already open closes it.
     if (self.presentedViewController != nil) {
@@ -453,7 +465,7 @@
         // A-32: re-size only when the bounds size actually changed.
         if (sizeChanged) {
             [_exitButton sizeToFit];
-            [_menuButton sizeToFit];
+            [self gpSizeMenuButton];
         }
         // GameParks v2.11: the exit and menu pills sit as one
         // centred pair, menu on the left.
