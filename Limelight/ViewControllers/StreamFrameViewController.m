@@ -357,7 +357,7 @@
     // the new settings. The stats session and the session's
     // stream-active flag belong to the navigation flow, which only
     // closes them when the stack pops to the root — a swap does not.
-    UIViewController *newStream = [[GPSessionController shared] streamViewControllerForRestartOfConfig:self.streamConfig];
+    UIViewController *newStream = [[GPSessionController sharedController] streamViewControllerForRestartOfConfig:self.streamConfig];
     if (newStream == nil) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Couldn't restart the stream"
                                                                        message:@"Your new settings are saved and will apply next time you launch. To use them now, end the stream and launch the game again."
