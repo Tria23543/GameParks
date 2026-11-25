@@ -63,6 +63,13 @@
     // on-screen controls, so it stays reachable when the virtual
     // gamepad is hidden.
     UIButton *_menuButton;
+    // GameParks v2.12: the XStreaming-style stats strip — a
+    // full-width bar pinned to the top of the screen carrying one
+    // horizontal row of stats. It replaces the v2.11 top-left
+    // stats chip; the connection warnings keep their own overlay
+    // view. Created with the other stream chrome (iOS only).
+    UIView *_statsStrip;
+    UILabel *_statsLabel;
     BOOL _userIsInteracting;
     CGSize _keyboardSize;
     // GameParks: last size seen by viewWillLayoutSubviews, used to
@@ -282,6 +289,24 @@
     _menuButton.accessibilityLabel = @"Stream menu";
     [_menuButton addTarget:self action:@selector(menuButtonPressed) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_menuButton];
+
+    // GameParks v2.12: the stats strip — XStreaming's PerfPanel
+    // horizontal style: translucent black at 0.7 panel opacity,
+    // square corners, 10 pt white text, the row centred, 2 pt
+    // padding. Hidden unless the stats overlay is on; its frame
+    // is set in viewWillLayoutSubviews. It never takes touches.
+    _statsStrip = [[UIView alloc] init];
+    _statsStrip.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.5];
+    _statsStrip.alpha = 0.7;
+    _statsStrip.userInteractionEnabled = NO;
+    _statsStrip.hidden = YES;
+    _statsLabel = [[UILabel alloc] init];
+    _statsLabel.font = [UIFont systemFontOfSize:10];
+    _statsLabel.textColor = [UIColor whiteColor];
+    _statsLabel.textAlignment = NSTextAlignmentCenter;
+    _statsLabel.userInteractionEnabled = NO;
+    [_statsStrip addSubview:_statsLabel];
+    [self.view addSubview:_statsStrip];
 #endif
 }
 
@@ -344,11 +369,19 @@
                                                                 repeats:YES];
             [self updateStatsOverlay];
         }
+        // GameParks v2.12: show the stats strip; the layout pass
+        // moves the pill pair below it.
+        _statsStrip.hidden = NO;
+        [self.view setNeedsLayout];
     }
     else {
         [_statsUpdateTimer invalidate];
         _statsUpdateTimer = nil;
         [self updateOverlayText:nil];
+        // GameParks v2.12: hide the stats strip; the layout pass
+        // returns the pill pair to the top.
+        _statsStrip.hidden = YES;
+        [self.view setNeedsLayout];
     }
 }
 
@@ -467,11 +500,27 @@
             [_exitButton sizeToFit];
             [self gpSizeMenuButton];
         }
+        // GameParks v2.12: while the stats overlay is on, the
+        // stats strip owns the top of the screen and the pill pair
+        // sits directly below it; with stats off the pair returns
+        // to the top. Strip visibility follows the stats timer —
+        // the same condition connectionStatusUpdate uses to give
+        // the stats precedence over the connection warnings.
+        CGFloat pairY = self.view.safeAreaInsets.top + 6;
+        if (_statsStrip != nil) {
+            BOOL statsOn = (_statsUpdateTimer != nil);
+            _statsStrip.hidden = !statsOn;
+            if (statsOn) {
+                CGFloat stripHeight = ceilf(_statsLabel.font.lineHeight) + 4;
+                _statsStrip.frame = CGRectMake(0, 0, bounds.size.width, stripHeight);
+                _statsLabel.frame = CGRectInset(_statsStrip.bounds, 2, 2);
+                pairY = stripHeight + 6;
+            }
+        }
         // GameParks v2.11: the exit and menu pills sit as one
         // centred pair, menu on the left.
         CGFloat pairGap = 8;
         CGFloat pairWidth = _menuButton.frame.size.width + pairGap + _exitButton.frame.size.width;
-        CGFloat pairY = self.view.safeAreaInsets.top + 6;
         CGRect menuFrame = _menuButton.frame;
         menuFrame.origin.x = (bounds.size.width - pairWidth) / 2;
         menuFrame.origin.y = pairY;
@@ -530,7 +579,16 @@
     NSString* overlayText = [self->_streamMan getStatsOverlayText];
     
     dispatch_async(dispatch_get_main_queue(), ^{
+#if TARGET_OS_TV
         [self updateOverlayText:overlayText];
+#else
+        // GameParks v2.12: the stats row renders in the top stats
+        // strip, not the connection-warning overlay. A nil text
+        // (no complete stats window yet) leaves the last row up.
+        if (overlayText != nil) {
+            self->_statsLabel.text = overlayText;
+        }
+#endif
     });
 }
 
@@ -708,6 +766,12 @@
                                                                      selector:@selector(updateStatsOverlay)
                                                                      userInfo:nil
                                                                       repeats:YES];
+            // GameParks v2.12: show the stats strip; the layout
+            // pass moves the pill pair below it. (The strip is
+            // iOS-only chrome; on tvOS it is nil and this is a
+            // no-op.)
+            self->_statsStrip.hidden = NO;
+            [self.view setNeedsLayout];
         }
     });
 }

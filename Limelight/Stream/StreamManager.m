@@ -158,35 +158,60 @@
         return nil;
     }
     
-    uint32_t rtt, variance;
-    NSString* latencyString;
-    if (LiGetEstimatedRttInfo(&rtt, &variance)) {
-        latencyString = [NSString stringWithFormat:@"%u ms (variance: %u ms)", rtt, variance];
-    }
-    else {
-        latencyString = @"N/A";
-    }
-    
-    NSString* hostProcessingString;
-    if (stats.framesWithHostProcessingLatency != 0) {
-        hostProcessingString = [NSString stringWithFormat:@"\nHost processing latency min/max/avg: %.1f/%.1f/%.1f ms",
-                                stats.minHostProcessingLatency / 10.f,
-                                stats.maxHostProcessingLatency / 10.f,
-                                (float)stats.totalHostProcessingLatency / stats.framesWithHostProcessingLatency / 10.f];
-    }
-    else {
-        hostProcessingString = @"";
-    }
-    
+    // GameParks v2.12: this text is now the single-line stats row
+    // in XStreaming's PerfPanel horizontal style — items joined by
+    // " | ", in its order, from the same engine sources this method
+    // has always used. Items the engine does not expose (jitter,
+    // packet loss, a measured bitrate) are omitted, never estimated;
+    // the host's average processing latency takes the decode-time
+    // slot under its own label. See gameparks-feature-v2.12.
     float interval = stats.endTime - stats.startTime;
-    return [NSString stringWithFormat:@"Video stream: %dx%d %.2f FPS (Codec: %@)\nFrames dropped by your network connection: %.2f%%\nAverage network latency: %@%@",
-            _config.width,
-            _config.height,
-            stats.totalFrames / interval,
-            [_connection getActiveCodecName],
-            stats.networkDroppedFrames / interval,
-            latencyString,
-            hostProcessingString];
+    if (interval <= 0) {
+        return nil;
+    }
+    
+    NSMutableArray<NSString*>* items = [NSMutableArray array];
+    
+    // Resolution — the stream's size, no label (as in XStreaming).
+    [items addObject:[NSString stringWithFormat:@"%d X %d", _config.width, _config.height]];
+    
+    // RTT — the engine's estimated round trip. XStreaming renders
+    // an unavailable value as -1; do the same.
+    uint32_t rtt, variance;
+    if (LiGetEstimatedRttInfo(&rtt, &variance)) {
+        [items addObject:[NSString stringWithFormat:@"RTT: %ums", rtt]];
+    }
+    else {
+        [items addObject:@"RTT: -1"];
+    }
+    
+    // FPS — the frames-per-second figure this overlay has always
+    // shown; integral values render without a fraction.
+    float fps = stats.totalFrames / interval;
+    if (fabsf(fps - roundf(fps)) < 0.05f) {
+        [items addObject:[NSString stringWithFormat:@"FPS: %.0f", fps]];
+    }
+    else {
+        [items addObject:[NSString stringWithFormat:@"FPS: %.1f", fps]];
+    }
+    
+    // FD — frames dropped by the network in this window: the real
+    // count, and its true share of the window's frames. (The old
+    // multi-line text divided the count by the window's length and
+    // labelled it %; the row shows the actual percentage.)
+    float droppedPercent = stats.totalFrames > 0
+        ? (float)stats.networkDroppedFrames / stats.totalFrames * 100.f
+        : 0.f;
+    [items addObject:[NSString stringWithFormat:@"FD: %d (%.2f%%)", stats.networkDroppedFrames, droppedPercent]];
+    
+    // Host — average host processing latency, only when the host
+    // reports per-frame latency (as before).
+    if (stats.framesWithHostProcessingLatency != 0) {
+        float avgHostLatency = (float)stats.totalHostProcessingLatency / stats.framesWithHostProcessingLatency / 10.f;
+        [items addObject:[NSString stringWithFormat:@"Host: %.1fms", avgHostLatency]];
+    }
+    
+    return [items componentsJoinedByString:@" | "];
 }
 
 @end
