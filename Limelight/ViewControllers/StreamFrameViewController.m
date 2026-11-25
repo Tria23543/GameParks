@@ -12,6 +12,8 @@
 #import "StreamManager.h"
 #import "ControllerSupport.h"
 #import "DataManager.h"
+#import "GPSessionController.h"
+#import "Moonlight-Swift.h"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -29,6 +31,13 @@
 @property(readonly, nonatomic) float refreshRate;
 - (id)initWithRefreshRate:(float)arg1 videoDynamicRange:(int)arg2;
 @end
+
+#if !TARGET_OS_TV
+// GameParks v2.11: the in-stream menu (GPStreamPanelViewController,
+// Swift) reports its live effects through this delegate.
+@interface StreamFrameViewController () <GPStreamPanelDelegate>
+@end
+#endif
 
 @implementation StreamFrameViewController {
     ControllerSupport *_controllerSupport;
@@ -48,6 +57,11 @@
     // GameParks: visible in-stream exit affordance (upstream's only
     // exits are an edge swipe and a gamepad combo — undiscoverable).
     UIButton *_exitButton;
+    // GameParks v2.11: the in-stream menu button, a sibling pill
+    // next to the exit pill. It is view chrome, not part of the
+    // on-screen controls, so it stays reachable when the virtual
+    // gamepad is hidden.
+    UIButton *_menuButton;
     BOOL _userIsInteracting;
     CGSize _keyboardSize;
     // GameParks: last size seen by viewWillLayoutSubviews, used to
@@ -250,6 +264,24 @@
     _exitButton.contentEdgeInsets = UIEdgeInsetsMake(14, 16, 14, 16);
     [_exitButton addTarget:self action:@selector(exitButtonPressed) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_exitButton];
+
+    // GameParks v2.11: the in-stream menu button — same pill chrome
+    // as the exit button, added to this view (never to the stream
+    // view), so it is not part of the virtual gamepad and stays
+    // visible and tappable when the gamepad is hidden. Its touches
+    // are handled by the button itself; nothing reaches the stream
+    // view's input handlers. Positioned with the exit pill as a
+    // centred pair in viewWillLayoutSubviews.
+    _menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_menuButton setTitle:@"☰" forState:UIControlStateNormal];
+    [_menuButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _menuButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _menuButton.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
+    _menuButton.layer.cornerRadius = 22;
+    _menuButton.contentEdgeInsets = UIEdgeInsetsMake(14, 16, 14, 16);
+    _menuButton.accessibilityLabel = @"Stream menu";
+    [_menuButton addTarget:self action:@selector(menuButtonPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_menuButton];
 #endif
 }
 
@@ -258,6 +290,101 @@
 
     [self returnToMainFrame];
 }
+
+#if !TARGET_OS_TV
+- (void)menuButtonPressed {
+    // Tapping the hamburger with the menu already open closes it.
+    if (self.presentedViewController != nil) {
+        [self dismissViewControllerAnimated:YES completion:nil];
+        return;
+    }
+    GPStreamPanelViewController *panel = [[GPStreamPanelViewController alloc] init];
+    panel.delegate = self;
+    panel.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    panel.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [self presentViewController:panel animated:YES completion:nil];
+}
+
+#pragma mark - GPStreamPanelDelegate (GameParks v2.11)
+
+- (void)streamPanelDidChangeAspectMode:(NSInteger)mode {
+    // The mode is already persisted by the panel (GPSettingsStore).
+    // Apply it to the live renderer; updateDisplayLayerGeometry
+    // stays the only writer of the layer's geometry. Before the
+    // connection starts there is no renderer yet — the persisted
+    // value is applied in connectionStarted instead.
+    VideoDecoderRenderer *renderer = _streamView.videoRenderer;
+    if (renderer != nil) {
+        renderer.gpDisplayMode = (GPDisplayMode)mode;
+        [renderer updateDisplayLayerGeometry];
+    }
+}
+
+- (void)streamPanelDidChangeStatsOverlay:(BOOL)on {
+    // The setting is already persisted by the panel. Drive the same
+    // timer upstream's connectionStarted starts, live.
+    if (on) {
+        if (_statsUpdateTimer == nil) {
+            _statsUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0f
+                                                                 target:self
+                                                               selector:@selector(updateStatsOverlay)
+                                                               userInfo:nil
+                                                                repeats:YES];
+            [self updateStatsOverlay];
+        }
+    }
+    else {
+        [_statsUpdateTimer invalidate];
+        _statsUpdateTimer = nil;
+        [self updateOverlayText:nil];
+    }
+}
+
+- (void)streamPanelDidChangeOnScreenControls {
+    // The new level is already persisted by the panel; re-apply it
+    // to the live controls exactly as stream setup did.
+    [_streamView gpApplyOnScreenControlsFromSettings:_controllerSupport];
+}
+
+- (void)streamPanelRequestsStreamRestart {
+    // The panel has already saved the new resolution/bitrate to the
+    // settings store. Rebuild a stream screen for the same host/app
+    // through the session's launch path (its configuration is built
+    // from the current settings), then swap it into this screen's
+    // place in the stack. Being removed from the stack stops this
+    // stream (willMoveToParentViewController:), the game keeps
+    // running on the host, and the new stream manager resumes it at
+    // the new settings. The stats session and the session's
+    // stream-active flag belong to the navigation flow, which only
+    // closes them when the stack pops to the root — a swap does not.
+    UIViewController *newStream = [[GPSessionController shared] streamViewControllerForRestartOfConfig:self.streamConfig];
+    if (newStream == nil) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Couldn't restart the stream"
+                                                                       message:@"Your new settings are saved and will apply next time you launch. To use them now, end the stream and launch the game again."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    // The repeating stats timer retains this controller; the normal
+    // exit path invalidates it in returnToMainFrame, so do the same
+    // here before being removed from the stack.
+    [_statsUpdateTimer invalidate];
+    _statsUpdateTimer = nil;
+    if (_inactivityTimer != nil) {
+        [_inactivityTimer invalidate];
+        _inactivityTimer = nil;
+    }
+    UINavigationController *nav = self.navigationController;
+    NSMutableArray<UIViewController *> *stack = [nav.viewControllers mutableCopy];
+    NSUInteger index = [stack indexOfObject:self];
+    if (index == NSNotFound) {
+        return;
+    }
+    stack[index] = newStream;
+    [nav setViewControllers:stack animated:NO];
+}
+#endif
 
 #if !TARGET_OS_TV
 - (void)viewWillAppear:(BOOL)animated {
@@ -326,10 +453,20 @@
         // A-32: re-size only when the bounds size actually changed.
         if (sizeChanged) {
             [_exitButton sizeToFit];
+            [_menuButton sizeToFit];
         }
+        // GameParks v2.11: the exit and menu pills sit as one
+        // centred pair, menu on the left.
+        CGFloat pairGap = 8;
+        CGFloat pairWidth = _menuButton.frame.size.width + pairGap + _exitButton.frame.size.width;
+        CGFloat pairY = self.view.safeAreaInsets.top + 6;
+        CGRect menuFrame = _menuButton.frame;
+        menuFrame.origin.x = (bounds.size.width - pairWidth) / 2;
+        menuFrame.origin.y = pairY;
+        _menuButton.frame = menuFrame;
         CGRect buttonFrame = _exitButton.frame;
-        buttonFrame.origin.x = (bounds.size.width - buttonFrame.size.width) / 2;
-        buttonFrame.origin.y = self.view.safeAreaInsets.top + 6;
+        buttonFrame.origin.x = menuFrame.origin.x + menuFrame.size.width + pairGap;
+        buttonFrame.origin.y = pairY;
         _exitButton.frame = buttonFrame;
     }
 }
@@ -405,9 +542,27 @@
 #if TARGET_OS_TV
         [_overlayView setFont:[UIFont systemFontOfSize:24]];
 #else
-        [_overlayView setFont:[UIFont systemFontOfSize:12]];
+        // GameParks v2.11: the overlay is a small chip in the
+        // design's tokens — panel-toned, Manrope, rounded — instead
+        // of upstream's centred grey block. It also carries the
+        // connection warnings, which read fine in the same chip.
+        [_overlayView setFont:[UIFont fontWithName:@"Manrope-SemiBold" size:12] ?: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]];
+        [_overlayView setTextColor:[UIColor whiteColor]];
+        [_overlayView setBackgroundColor:[[UIColor colorWithRed:16.0/255 green:19.0/255 blue:29.0/255 alpha:1.0] colorWithAlphaComponent:0.78]];
+        _overlayView.layer.cornerRadius = 8;
+        _overlayView.clipsToBounds = YES;
+        [_overlayView setTextContainerInset:UIEdgeInsetsMake(6, 8, 6, 8)];
+        if (_statsUpdateTimer != nil) {
+            [_overlayView setTextAlignment:NSTextAlignmentLeft];
+        }
 #endif
+#if TARGET_OS_TV
         [_overlayView setAlpha:0.5];
+#else
+        // GameParks v2.11: the chip's translucency lives in its
+        // background colour; the text stays fully legible.
+        [_overlayView setAlpha:1.0];
+#endif
         [self.view addSubview:_overlayView];
     }
     
@@ -421,7 +576,16 @@
                                            _overlayView.frame.size.height)];
         [_overlayView setText:text];
         [_overlayView sizeToFit];
+#if TARGET_OS_TV
         [_overlayView setCenter:CGPointMake(self.view.frame.size.width / 2, _overlayView.frame.size.height / 2)];
+#else
+        // GameParks v2.11: top-left corner, below the centred
+        // chrome pills, instead of upstream's top-centre.
+        [_overlayView setFrame:CGRectMake(self.view.safeAreaInsets.left + 8,
+                                          self.view.safeAreaInsets.top + 56,
+                                          _overlayView.frame.size.width,
+                                          _overlayView.frame.size.height)];
+#endif
         [_overlayView setHidden:NO];
     }
     else {
@@ -430,6 +594,14 @@
 }
 
 - (void) returnToMainFrame {
+#if !TARGET_OS_TV
+    // GameParks v2.11: if the in-stream menu is open, it leaves
+    // with the stream — popping while a modal is still presented
+    // would strand the panel over the root screens.
+    if (self.presentedViewController != nil) {
+        [self dismissViewControllerAnimated:NO completion:nil];
+    }
+#endif
     // Reset display mode back to default
     [self updatePreferredDisplayMode:NO];
     
@@ -500,10 +672,25 @@
         self->_tipLabel.hidden = YES;
         
         [self->_streamView showOnScreenControls];
-        
+
         [self->_controllerSupport connectionEstablished];
-        
-        if (self->_settings.statsOverlay) {
+
+#if !TARGET_OS_TV
+        // GameParks v2.11: apply the persisted display aspect mode
+        // to the renderer that now exists. The mode's only other
+        // writer is the in-stream menu, live.
+        VideoDecoderRenderer *renderer = self->_streamView.videoRenderer;
+        if (renderer != nil) {
+            renderer.gpDisplayMode = (GPDisplayMode)[[NSUserDefaults standardUserDefaults] integerForKey:@"GPDisplayAspectMode"];
+            [renderer updateDisplayLayerGeometry];
+        }
+#endif
+
+        // GameParks v2.11: read the stats setting fresh rather than
+        // from the viewDidLoad snapshot — the in-stream menu can
+        // change it before the connection finishes starting, and the
+        // snapshot would override the user's choice.
+        if ([[[DataManager alloc] init] getSettings].statsOverlay) {
             self->_statsUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0f
                                                                        target:self
                                                                      selector:@selector(updateStatsOverlay)

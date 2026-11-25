@@ -55,16 +55,42 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
         return;
     }
 
-    // A-99: never divide by an unset aspect ratio.
-    if (_streamAspectRatio <= 0) {
-        return;
+    // GameParks: the aspect the fit math works from — the stream's
+    // own, or the fixed ratio a Lock mode names. Fill and Stretch
+    // don't use it.
+    float effectiveAspect = _streamAspectRatio;
+    switch (_gpDisplayMode) {
+        case GPDisplayModeLock16x9: effectiveAspect = 16.0f / 9.0f; break;
+        case GPDisplayModeLock4x3:  effectiveAspect = 4.0f / 3.0f;  break;
+        case GPDisplayModeLock21x9: effectiveAspect = 21.0f / 9.0f; break;
+        default: break;
     }
 
+    CGSize viewSize = _view.bounds.size;
     CGSize videoSize;
-    if (_view.bounds.size.width > _view.bounds.size.height * _streamAspectRatio) {
-        videoSize = CGSizeMake(_view.bounds.size.height * _streamAspectRatio, _view.bounds.size.height);
+    if (_gpDisplayMode == GPDisplayModeStretch) {
+        // Fill the screen exactly, distorting the picture.
+        videoSize = viewSize;
     } else {
-        videoSize = CGSizeMake(_view.bounds.size.width, _view.bounds.size.width / _streamAspectRatio);
+        // A-99: never divide by an unset aspect ratio.
+        if (effectiveAspect <= 0) {
+            return;
+        }
+        if (_gpDisplayMode == GPDisplayModeFill) {
+            // Cover the screen, cropping whatever overflows.
+            if (viewSize.width / viewSize.height > effectiveAspect) {
+                videoSize = CGSizeMake(viewSize.width, viewSize.width / effectiveAspect);
+            } else {
+                videoSize = CGSizeMake(viewSize.height * effectiveAspect, viewSize.height);
+            }
+        } else {
+            // Fit (and the Lock modes): the whole picture, letterboxed.
+            if (viewSize.width > viewSize.height * effectiveAspect) {
+                videoSize = CGSizeMake(viewSize.height * effectiveAspect, viewSize.height);
+            } else {
+                videoSize = CGSizeMake(viewSize.width, viewSize.width / effectiveAspect);
+            }
+        }
     }
 
     [CATransaction begin];

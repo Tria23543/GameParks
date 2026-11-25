@@ -19,6 +19,7 @@
 #import "TemporaryApp.h"
 
 @class DiscoveryManager;
+@class StreamConfiguration;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -130,6 +131,18 @@ extern NSString * const GPHostInfoErrorMessageKey;
 /// Returns nil if the app has no host, or if the settings record
 /// is missing (GP v2.6, B-28). Call on the main queue.
 - (nullable UIViewController *)streamViewControllerForApp:(TemporaryApp *)app;
+
+/// GameParks v2.11: a fresh stream view controller for the SAME
+/// host/app a live stream configuration names, built by the exact
+/// launch path above (so the configuration is rebuilt from the
+/// current settings record). Used by the in-stream menu's
+/// restart-to-apply: the stream screen swaps itself for the returned
+/// controller, the old connection ends, and the new stream manager
+/// resumes the still-running app on the host at the new settings.
+/// The host is matched by its server certificate and the app by its
+/// id within that host's app list — never by name alone. Returns nil
+/// when no match exists. Call on the main queue.
+- (nullable UIViewController *)streamViewControllerForRestartOfConfig:(StreamConfiguration *)config;
 
 /// The stream view controller was pushed / popped. Discovery pauses
 /// during a stream (upstream's viewDidDisappear does this) and a

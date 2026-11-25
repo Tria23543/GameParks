@@ -39,6 +39,14 @@
 - (void) showOnScreenControls;
 - (OnScreenControlsLevel) getCurrentOscState;
 
+// GameParks: re-apply the on-screen-controls level from the current
+// settings record, using exactly the branch setupStreamView used at
+// stream start (absolute touch mode forces Off; Auto goes through
+// ControllerSupport's auto mode; anything else is set directly).
+// Lets the in-stream menu show/hide the virtual gamepad live, after
+// the new level has been saved to the settings store.
+- (void) gpApplyOnScreenControlsFromSettings:(ControllerSupport*)controllerSupport;
+
 #if !TARGET_OS_TV
 - (void) updateCursorLocation:(CGPoint)location isMouse:(BOOL)isMouse;
 #endif

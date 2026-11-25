@@ -207,6 +207,23 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     }
 }
 
+- (void) gpApplyOnScreenControlsFromSettings:(ControllerSupport*)controllerSupport {
+    if (onScreenControls == nil) {
+        return;
+    }
+    TemporarySettings* settings = [[[DataManager alloc] init] getSettings];
+    OnScreenControlsLevel level = (OnScreenControlsLevel)[settings.onscreenControls integerValue];
+    if (settings.absoluteTouchMode) {
+        [onScreenControls setLevel:OnScreenControlsLevelOff];
+    }
+    else if (level == OnScreenControlsLevelAuto) {
+        [controllerSupport initAutoOnScreenControlMode:onScreenControls];
+    }
+    else {
+        [onScreenControls setLevel:level];
+    }
+}
+
 - (CGSize) getVideoAreaSize {
     if (self.bounds.size.width > self.bounds.size.height * streamAspectRatio) {
         return CGSizeMake(self.bounds.size.height * streamAspectRatio, self.bounds.size.height);

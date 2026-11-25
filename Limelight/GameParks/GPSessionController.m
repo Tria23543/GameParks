@@ -1400,6 +1400,32 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     return streamFrame;
 }
 
+/// GameParks v2.11: find the host/app a live configuration names
+/// and rebuild through the launch path above. The certificate is
+/// the host identity (addresses change; the cert is what pairing
+/// pinned). The app object gets its host assigned first, exactly
+/// like GPConnecting does before building a configuration.
+- (UIViewController *)streamViewControllerForRestartOfConfig:(StreamConfiguration *)config {
+    if (config == nil || config.serverCert == nil || config.appID == nil) {
+        return nil;
+    }
+    for (TemporaryHost *host in self.hosts) {
+        if (host.serverCert == nil || ![host.serverCert isEqual:config.serverCert]) {
+            continue;
+        }
+        for (TemporaryApp *app in host.appList) {
+            if (app.id != nil && [app.id isEqualToString:config.appID]) {
+                app.host = host;
+                return [self streamViewControllerForApp:app];
+            }
+        }
+        // The cert matched but the app is not in this host's list:
+        // no other host can be the right one.
+        return nil;
+    }
+    return nil;
+}
+
 /// Upstream prepareToStreamApp:, verbatim apart from building and
 /// returning a local configuration instead of setting an ivar.
 - (StreamConfiguration *)streamConfigForApp:(TemporaryApp *)app {

@@ -107,6 +107,19 @@ enum GPSettingsStore {
              bitrateKbps: preset.bitrateKbps, codec: preset.codec)
     }
 
+    /// v2.11: the stream display aspect mode — GPDisplayMode raw
+    /// values (Fit 0, Fill 1, Stretch 2, 16:9 3, 4:3 4, 21:9 5).
+    /// There is no engine setting for this: it only steers the
+    /// display layer's geometry math on this device, so it lives in
+    /// UserDefaults alongside GPOscPreviousLevel, with this store as
+    /// the one place that reads and writes it. The stream screen
+    /// reads the same key ("GPDisplayAspectMode") when a stream
+    /// connects, and the in-stream menu writes it here.
+    static var displayAspectMode: Int {
+        get { UserDefaults.standard.integer(forKey: "GPDisplayAspectMode") }
+        set { UserDefaults.standard.set(newValue, forKey: "GPDisplayAspectMode") }
+    }
+
     /// A-18: the explicit row shown when there is no settings record.
     static func settingsUnavailableView() -> UIView {
         let view = GPMessageView()
@@ -594,4 +607,329 @@ func gpSegmented(items: [String]) -> UISegmentedControl {    let segmented = GPG
     segmented.setTitleTextAttributes([.foregroundColor: GPColor.onAccent,
                                       .font: GPFont.body(13, weight: .bold)], for: .selected)
     return segmented
+}
+
+// MARK: - In-stream menu (v2.11)
+
+/// The live effects the in-stream menu asks its host — the stream
+/// screen — to perform. Everything else (reading and saving
+/// settings) the menu does itself through GPSettingsStore, so the
+/// Settings screens and the menu can never disagree about a value.
+@objc protocol GPStreamPanelDelegate: AnyObject {
+    func streamPanelDidChangeAspectMode(_ mode: Int)
+    func streamPanelDidChangeStatsOverlay(_ on: Bool)
+    func streamPanelDidChangeOnScreenControls()
+    func streamPanelRequestsStreamRestart()
+}
+
+/// The in-stream menu: the stream screen's hamburger button opens
+/// this panel over the running stream, in the shape XStreaming and
+/// Better xCloud use. Aspect ratio, the stats overlay and the
+/// virtual gamepad apply live. Resolution and bitrate are staged
+/// behind an Apply button, because the engine negotiates them when
+/// a stream connects — applying restarts the stream into the same
+/// game, which keeps running on the PC.
+@objc(GPStreamPanelViewController)
+final class GPStreamPanelViewController: UIViewController {
+    @objc weak var delegate: GPStreamPanelDelegate?
+
+    private let backdropView = UIView()
+    private let panelView = UIView()
+    private var bitrateValueLabel: UILabel?
+    private var applyButton: UIButton?
+
+    /// The resolution table, built in buildContent: the standard
+    /// sizes, plus the stored pair as its own segment when it sits
+    /// outside the list (the A-40 rule from Stream settings).
+    private var resolutionSizes: [(width: Int, height: Int)] = []
+
+    /// Staged stream values — written to the store only by Apply.
+    private var stagedWidth = 0
+    private var stagedHeight = 0
+    private var stagedBitrateMbps = 0
+    /// The values the running stream was built from (a stream's
+    /// configuration is built from the store, so: the saved ones).
+    private var savedWidth = 0
+    private var savedHeight = 0
+    private var savedBitrateKbps = 0
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .landscapeRight }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+
+        backdropView.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        backdropView.translatesAutoresizingMaskIntoConstraints = false
+        backdropView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(dismissTapped)))
+        view.addSubview(backdropView)
+
+        panelView.backgroundColor = GPColor.panel
+        panelView.layer.cornerRadius = 20
+        panelView.layer.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
+        panelView.clipsToBounds = true
+        panelView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(panelView)
+
+        let scroll = GPScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.showsVerticalScrollIndicator = false
+        panelView.addSubview(scroll)
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(stack)
+
+        let panelWidth = panelView.widthAnchor.constraint(equalToConstant: 360)
+        panelWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            backdropView.topAnchor.constraint(equalTo: view.topAnchor),
+            backdropView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            backdropView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            backdropView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            panelView.topAnchor.constraint(equalTo: view.topAnchor),
+            panelView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            panelView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            panelWidth,
+            panelView.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -24),
+            scroll.topAnchor.constraint(equalTo: panelView.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: panelView.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: panelView.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: panelView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -20),
+            stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -40),
+        ])
+
+        buildContent(into: stack)
+
+        // Start off-screen right; viewDidAppear slides the panel in.
+        panelView.transform = CGAffineTransform(translationX: 380, y: 0)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut]) {
+            self.panelView.transform = .identity
+        }
+    }
+
+    private func buildContent(into stack: UIStackView) {
+        // Header: title + close.
+        let header = UIStackView()
+        header.axis = .horizontal
+        header.alignment = .center
+        header.spacing = 10
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let closeButton = UIButton(type: .system)
+        closeButton.setTitle("✕", for: .normal)
+        closeButton.setTitleColor(GPColor.textPrimary, for: .normal)
+        closeButton.titleLabel?.font = GPFont.body(17, weight: .semibold)
+        closeButton.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
+        header.addArrangedSubview(gpLabel("Stream menu", font: GPFont.display(19, weight: .bold),
+                                          color: GPColor.textPrimary, lines: 1))
+        header.addArrangedSubview(spacer)
+        header.addArrangedSubview(closeButton)
+        stack.addArrangedSubview(header)
+
+        // Display: aspect applies live, so it is not staged.
+        stack.addArrangedSubview(gpSectionHeader("Display"))
+        let aspect = gpSegmented(items: ["Fit", "Fill", "Stretch", "16:9", "4:3", "21:9"])
+        aspect.selectedSegmentIndex = min(max(GPSettingsStore.displayAspectMode, 0), 5)
+        aspect.addTarget(self, action: #selector(aspectChanged(_:)), for: .valueChanged)
+        stack.addArrangedSubview(gpStreamPanelCard(title: "Aspect ratio", control: aspect))
+
+        // A-18, same as the Settings screens: no settings record,
+        // no silent no-op saves — say so and offer only what works
+        // without the record (the aspect mode above).
+        guard let cur = GPSettingsStore.current() else {
+            stack.addArrangedSubview(GPSettingsStore.settingsUnavailableView())
+            return
+        }
+
+        savedWidth = cur.width?.intValue ?? 1920
+        savedHeight = cur.height?.intValue ?? 1080
+        savedBitrateKbps = cur.bitrate?.intValue ?? 20000
+        stagedWidth = savedWidth
+        stagedHeight = savedHeight
+
+        // Stream: resolution + bitrate, staged behind Apply.
+        stack.addArrangedSubview(gpSectionHeader("Stream"))
+        resolutionSizes = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)]
+        let standardSizes = resolutionSizes
+        if !resolutionSizes.contains(where: { $0.width == savedWidth && $0.height == savedHeight }) {
+            resolutionSizes.append((savedWidth, savedHeight))
+        }
+        let resolutionItems = resolutionSizes.map { size -> String in
+            if standardSizes.contains(where: { $0.width == size.width && $0.height == size.height }) {
+                return size.height == 2160 ? "4K" : "\(size.height)p"
+            }
+            return "\(size.width)×\(size.height)"
+        }
+        let resolution = gpSegmented(items: resolutionItems)
+        resolution.selectedSegmentIndex = resolutionSizes.firstIndex(where: { $0.width == savedWidth && $0.height == savedHeight }) ?? 1
+        resolution.addTarget(self, action: #selector(resolutionChanged(_:)), for: .valueChanged)
+        stack.addArrangedSubview(gpStreamPanelCard(title: "Resolution", control: resolution))
+
+        // Bitrate stepper card — the Stream settings screen's shape.
+        let bitrateCard = UIView()
+        bitrateCard.backgroundColor = GPColor.panelRaised
+        bitrateCard.layer.cornerRadius = 16
+        let stepper = GPGuardedStepper()
+        stepper.minimumValue = 1
+        stepper.maximumValue = 200
+        stepper.stepValue = 1
+        stepper.value = Double(savedBitrateKbps) / 1000.0
+        stepper.tintColor = GPColor.accent
+        stepper.addTarget(self, action: #selector(bitrateChanged(_:)), for: .valueChanged)
+        // A-39's rule, as on the settings screen: the staged value
+        // and the label both come from the stepper's clamped value.
+        stagedBitrateMbps = Int(stepper.value)
+        let bitrateValue = gpLabel("\(Int(stepper.value)) Mb/s",
+                                   font: GPFont.body(15, weight: .semibold), color: GPColor.textPrimary, lines: 1)
+        bitrateValueLabel = bitrateValue
+        let bitrateText = UIStackView(arrangedSubviews: [
+            gpLabel("Bitrate", font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1),
+            gpLabel("Higher = sharper picture", font: GPFont.body(13), color: GPColor.textSecondary, lines: 1),
+        ])
+        bitrateText.axis = .vertical
+        bitrateText.spacing = 2
+        let bitrateRow = UIStackView(arrangedSubviews: [bitrateText, bitrateValue, stepper])
+        bitrateRow.axis = .horizontal
+        bitrateRow.alignment = .center
+        bitrateRow.spacing = 10
+        bitrateRow.translatesAutoresizingMaskIntoConstraints = false
+        bitrateCard.addSubview(bitrateRow)
+        NSLayoutConstraint.activate([
+            bitrateRow.topAnchor.constraint(equalTo: bitrateCard.topAnchor, constant: 12),
+            bitrateRow.bottomAnchor.constraint(equalTo: bitrateCard.bottomAnchor, constant: -12),
+            bitrateRow.leadingAnchor.constraint(equalTo: bitrateCard.leadingAnchor, constant: 16),
+            bitrateRow.trailingAnchor.constraint(equalTo: bitrateCard.trailingAnchor, constant: -16),
+        ])
+        stack.addArrangedSubview(bitrateCard)
+
+        stack.addArrangedSubview(gpLabel("Resolution and bitrate apply by restarting the stream — your game keeps running on the PC.",
+                                         font: GPFont.body(13), color: GPColor.textSecondary, lines: 0))
+        let apply = gpPrimaryButton("Apply & restart stream")
+        apply.addTarget(self, action: #selector(applyTapped), for: .touchUpInside)
+        apply.heightAnchor.constraint(equalToConstant: 48).isActive = true
+        applyButton = apply
+        stack.addArrangedSubview(apply)
+        refreshApply()
+
+        // Overlay: both toggles apply live and persist.
+        stack.addArrangedSubview(gpSectionHeader("Overlay"))
+        let statsRow = GPSwitchRow()
+        statsRow.backgroundColor = GPColor.panelRaised
+        statsRow.titleLabel.text = "Stats overlay"
+        statsRow.subtitle = "FPS · latency · stream info, live in the corner"
+        statsRow.isOn = cur.statsOverlay
+        statsRow.onToggle = { [weak self] isOn in
+            GPSettingsStore.save(statsOverlay: isOn)
+            self?.delegate?.streamPanelDidChangeStatsOverlay(isOn)
+        }
+        stack.addArrangedSubview(statsRow)
+
+        let oscRow = GPSwitchRow()
+        oscRow.backgroundColor = GPColor.panelRaised
+        oscRow.titleLabel.text = "On-screen controls"
+        let oscLevel = cur.onscreenControls?.intValue ?? 0
+        oscRow.subtitle = GPSettingsViewController.oscSubtitle(level: oscLevel)
+        oscRow.isOn = oscLevel != 0
+        oscRow.onToggle = { [weak self, weak oscRow] isOn in
+            // The Settings screen's own logic, verbatim: turning
+            // off stashes the level; turning on restores it (or
+            // Auto when nothing was stashed).
+            if isOn {
+                let stored = UserDefaults.standard.integer(forKey: "GPOscPreviousLevel")
+                GPSettingsStore.save(onscreenControls: stored != 0 ? stored : 1)
+            } else {
+                let current = GPSettingsStore.current()?.onscreenControls?.intValue ?? 0
+                if current != 0 {
+                    UserDefaults.standard.set(current, forKey: "GPOscPreviousLevel")
+                }
+                GPSettingsStore.save(onscreenControls: 0)
+            }
+            let newLevel = GPSettingsStore.current()?.onscreenControls?.intValue ?? 0
+            oscRow.subtitle = GPSettingsViewController.oscSubtitle(level: newLevel)
+            self?.delegate?.streamPanelDidChangeOnScreenControls()
+        }
+        stack.addArrangedSubview(oscRow)
+    }
+
+    private func refreshApply() {
+        let changed = stagedWidth != savedWidth || stagedHeight != savedHeight
+            || stagedBitrateMbps * 1000 != savedBitrateKbps
+        applyButton?.isEnabled = changed
+        applyButton?.alpha = changed ? 1.0 : 0.45
+    }
+
+    // MARK: - Actions
+
+    @objc private func dismissTapped() {
+        dismiss(animated: true)
+    }
+
+    @objc private func aspectChanged(_ sender: UISegmentedControl) {
+        GPSettingsStore.displayAspectMode = sender.selectedSegmentIndex
+        delegate?.streamPanelDidChangeAspectMode(sender.selectedSegmentIndex)
+    }
+
+    @objc private func resolutionChanged(_ sender: UISegmentedControl) {
+        guard resolutionSizes.indices.contains(sender.selectedSegmentIndex) else { return }
+        let size = resolutionSizes[sender.selectedSegmentIndex]
+        stagedWidth = size.width
+        stagedHeight = size.height
+        refreshApply()
+    }
+
+    @objc private func bitrateChanged(_ sender: UIStepper) {
+        stagedBitrateMbps = Int(sender.value)
+        bitrateValueLabel?.text = "\(Int(sender.value)) Mb/s"
+        refreshApply()
+    }
+
+    @objc private func applyTapped() {
+        GPSettingsStore.save(width: stagedWidth, height: stagedHeight,
+                             bitrateKbps: stagedBitrateMbps * 1000)
+        savedWidth = stagedWidth
+        savedHeight = stagedHeight
+        savedBitrateKbps = stagedBitrateMbps * 1000
+        refreshApply()
+        // The restart swaps the stream screen under this panel, so
+        // the panel leaves first and asks on its way out.
+        dismiss(animated: true) { [weak self] in
+            self?.delegate?.streamPanelRequestsStreamRestart()
+        }
+    }
+}
+
+/// A titled control card for the stream panel — the Stream
+/// settings screen's card shape, in the raised tone that sits on
+/// the panel's own background.
+func gpStreamPanelCard(title: String, control: UIView) -> UIView {
+    let card = UIView()
+    card.backgroundColor = GPColor.panelRaised
+    card.layer.cornerRadius = 16
+    let stack = UIStackView(arrangedSubviews: [
+        gpLabel(title, font: GPFont.body(16, weight: .semibold), color: GPColor.textPrimary, lines: 1),
+        control,
+    ])
+    stack.axis = .vertical
+    stack.spacing = 10
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    card.addSubview(stack)
+    NSLayoutConstraint.activate([
+        stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+        stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+        stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+        stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+    ])
+    return card
 }
