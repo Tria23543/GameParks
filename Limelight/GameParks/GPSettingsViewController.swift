@@ -857,7 +857,7 @@ final class GPStreamPanelViewController: UIViewController {
                 GPSettingsStore.save(onscreenControls: 0)
             }
             let newLevel = GPSettingsStore.current()?.onscreenControls?.intValue ?? 0
-            oscRow.subtitle = GPSettingsViewController.oscSubtitle(level: newLevel)
+            oscRow?.subtitle = GPSettingsViewController.oscSubtitle(level: newLevel)
             self?.delegate?.streamPanelDidChangeOnScreenControls()
         }
         stack.addArrangedSubview(oscRow)
