@@ -313,6 +313,13 @@
 - (void)exitButtonPressed {
     Log(LOG_I, @"User tapped End Stream button");
 
+    // GameParks v2.16: End Stream means the session ends completely,
+    // not just this phone's connection — so also end it on the host.
+    // Only this deliberate exit (and the edge swipe below) does this;
+    // backgrounding, the inactivity timer and connection failures
+    // still disconnect only, leaving the session resumable.
+    [[GPSessionController sharedController] endSessionForConfig:self.streamConfig];
+
     [self returnToMainFrame];
 }
 
@@ -729,7 +736,11 @@
 
 - (void)edgeSwiped {
     Log(LOG_I, @"User swiped to end stream");
-    
+
+    // GameParks v2.16: the edge swipe is the same deliberate exit as
+    // the End Stream button, so it ends the host session too.
+    [[GPSessionController sharedController] endSessionForConfig:self.streamConfig];
+
     [self returnToMainFrame];
 }
 

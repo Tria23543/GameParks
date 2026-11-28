@@ -144,6 +144,18 @@ extern NSString * const GPHostInfoErrorMessageKey;
 /// when no match exists. Call on the main queue.
 - (nullable UIViewController *)streamViewControllerForRestartOfConfig:(StreamConfiguration *)config;
 
+/// GameParks v2.16: end the host-side session a live configuration
+/// names, resolving the host and app exactly like the restart
+/// lookup above, then sending the host the quit-app request — the
+/// only client-side way to truly end a session (a plain disconnect
+/// leaves the session resumable and the app marked as running).
+/// What the host terminates is only the process it manages for the
+/// entry: the Desktop entry has no commands, and detached entries
+/// (the Steam games) are run and forgotten by the host, so ending
+/// their session closes nothing the user is playing. Fire-and-
+/// forget: the caller is leaving the stream either way.
+- (void)endSessionForConfig:(StreamConfiguration *)config;
+
 /// The stream view controller was pushed / popped. Discovery pauses
 /// during a stream (upstream's viewDidDisappear does this) and a
 /// full refresh runs when it ends (upstream's beginForegroundRefresh).

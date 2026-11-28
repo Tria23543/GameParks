@@ -1426,6 +1426,33 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     return nil;
 }
 
+/// GameParks v2.16: see the header for why this exists. The quit
+/// request runs on the session controller's own background queue
+/// (inside quitApp:onHost:completion:), so the stream's teardown
+/// is never blocked on it.
+- (void)endSessionForConfig:(StreamConfiguration *)config {
+    if (config == nil || config.serverCert == nil || config.appID == nil) {
+        return;
+    }
+    for (TemporaryHost *host in self.hosts) {
+        if (host.serverCert == nil || ![host.serverCert isEqual:config.serverCert]) {
+            continue;
+        }
+        for (TemporaryApp *app in host.appList) {
+            if (app.id != nil && [app.id isEqualToString:config.appID]) {
+                app.host = host;
+                [self quitApp:app onHost:host completion:^(BOOL success) {
+                    Log(LOG_I, @"GameParks: end-session request for %@ %@", app.name, success ? @"succeeded" : @"did not complete");
+                }];
+                return;
+            }
+        }
+        // The cert matched but the app is not in this host's list:
+        // no other host can be the right one.
+        return;
+    }
+}
+
 /// Upstream prepareToStreamApp:, verbatim apart from building and
 /// returning a local configuration instead of setting an ivar.
 - (StreamConfiguration *)streamConfigForApp:(TemporaryApp *)app {
