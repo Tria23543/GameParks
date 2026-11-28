@@ -326,7 +326,23 @@ static float L3_Y;
             [self drawBumpers];
             [self drawTriggers];
             [self drawSticks];
-            [self hideL3R3]; // Full controls don't need these they have the sticks
+            // GameParks v2.22: real stick-press buttons in the Full
+            // layout (before this, the only way was double-tapping a
+            // stick). They sit low, under and outside the sticks —
+            // clear of the sticks themselves, the D-pad, and the
+            // Select/Start (PS5) or View/Menu (Xbox) pills.
+            if (_controllerLayout == 1) {
+                L3_X = _controlArea.size.width * .24 + _controlArea.origin.x;
+                R3_X = _controlArea.size.width * .76 + _controlArea.origin.x;
+                L3_Y = _controlArea.size.height * .90 + _controlArea.origin.y;
+                R3_Y = L3_Y;
+            } else {
+                L3_X = _controlArea.size.width * .24 + _controlArea.origin.x;
+                R3_X = _controlArea.size.width * .76 + _controlArea.origin.x;
+                L3_Y = _controlArea.size.height * .92 + _controlArea.origin.y;
+                R3_Y = L3_Y;
+            }
+            [self drawStickPressButtons];
             break;
         default:
             Log(LOG_W, @"Unknown on-screen controls level: %d", (int)_level);
@@ -605,6 +621,27 @@ static float L3_Y;
     [_view.layer addSublayer:_l3Button];
     
     UIImage* r3ButtonImage = [UIImage imageNamed:@"R3"];
+    _r3Button.frame = CGRectMake(R3_X - r3ButtonImage.size.width / 2, R3_Y - r3ButtonImage.size.height / 2, r3ButtonImage.size.width, r3ButtonImage.size.height);
+    _r3Button.contents = (id) r3ButtonImage.CGImage;
+    _r3Button.cornerRadius = r3ButtonImage.size.width / 2;
+    _r3Button.borderColor = [UIColor colorWithRed:15.f/255 green:160.f/255 blue:40.f/255 alpha:1.f].CGColor;
+    [_view.layer addSublayer:_r3Button];
+}
+
+// GameParks v2.22: the Full layout's stick-press buttons. Same layers
+// and tap-to-latch behaviour as drawL3R3 (which the Auto levels use
+// with the stock 80pt artwork); these use GameParks' smaller 56pt set,
+// labelled L3/R3 in the PS5 layout and LS/RS in the Xbox layout.
+- (void) drawStickPressButtons {
+    BOOL xboxLayout = (_controllerLayout == 1);
+    UIImage* l3ButtonImage = [UIImage imageNamed:(xboxLayout ? @"GpLS" : @"GpL3")];
+    _l3Button.frame = CGRectMake(L3_X - l3ButtonImage.size.width / 2, L3_Y - l3ButtonImage.size.height / 2, l3ButtonImage.size.width, l3ButtonImage.size.height);
+    _l3Button.contents = (id) l3ButtonImage.CGImage;
+    _l3Button.cornerRadius = l3ButtonImage.size.width / 2;
+    _l3Button.borderColor = [UIColor colorWithRed:15.f/255 green:160.f/255 blue:40.f/255 alpha:1.f].CGColor;
+    [_view.layer addSublayer:_l3Button];
+    
+    UIImage* r3ButtonImage = [UIImage imageNamed:(xboxLayout ? @"GpRS" : @"GpR3")];
     _r3Button.frame = CGRectMake(R3_X - r3ButtonImage.size.width / 2, R3_Y - r3ButtonImage.size.height / 2, r3ButtonImage.size.width, r3ButtonImage.size.height);
     _r3Button.contents = (id) r3ButtonImage.CGImage;
     _r3Button.cornerRadius = r3ButtonImage.size.width / 2;
