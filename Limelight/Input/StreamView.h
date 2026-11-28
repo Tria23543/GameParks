@@ -37,6 +37,12 @@
      interactionDelegate:(id<UserInteractionDelegate>)interactionDelegate
                   config:(StreamConfiguration*)streamConfig;
 - (void) showOnScreenControls;
+// GameParks v2.18: open the iPhone keyboard over the stream — the
+// same keyboard the three-finger tap toggles; typed text is sent
+// to the PC. And the on-screen controller layout: 0 = PS5,
+// 1 = Xbox, applied live.
+- (void) showKeyboard;
+- (void) setOnScreenControllerLayout:(NSInteger)layout;
 - (OnScreenControlsLevel) getCurrentOscState;
 
 // GameParks: re-apply the on-screen-controls level from the current

@@ -34,6 +34,12 @@ typedef NS_ENUM(NSInteger, OnScreenControlsLevel) {
 // GameParks: recompute the control layout from the view's current
 // frame (the frame captured at init may predate a rotation).
 - (void) refreshLayout;
+// GameParks v2.18: the Full layout's arrangement — 0 = the layout
+// GameParks has always shipped (called PS5 in the app), 1 = the
+// Xbox arrangement (left stick high, D-pad below it, the ABXY
+// cluster high on the right). Only the centres move; the same
+// centres drive the touch handling.
+- (void) setControllerLayout:(NSInteger)layout;
 - (void) show;
 
 @end

@@ -80,6 +80,10 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     }
     
     onScreenControls = [[OnScreenControls alloc] initWithView:self controllerSup:controllerSupport streamConfig:streamConfig];
+    // GameParks v2.18: start from the controller layout the user
+    // picked (Settings or the stream menu write the same key);
+    // the menu can change it live via setOnScreenControllerLayout:.
+    [onScreenControls setControllerLayout:[[NSUserDefaults standardUserDefaults] integerForKey:@"GPControllerLayout"]];
     OnScreenControlsLevel level = (OnScreenControlsLevel)[settings.onscreenControls integerValue];
     if (settings.absoluteTouchMode) {
         Log(LOG_I, @"On-screen controls disabled in absolute touch mode");
@@ -195,6 +199,14 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 - (void) showOnScreenControls {
 #if !TARGET_OS_TV
     [onScreenControls show];
+#endif
+}
+
+// GameParks v2.18: forward the layout choice to the on-screen
+// controls, which redraw in place when they are showing.
+- (void) setOnScreenControllerLayout:(NSInteger)layout {
+#if !TARGET_OS_TV
+    [onScreenControls setControllerLayout:layout];
 #endif
 }
 
@@ -400,15 +412,33 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         [touchHandler touchesBegan:touches withEvent:event];
         
         if ([[event allTouches] count] == 3) {
-            if (isInputingText) {
-                Log(LOG_D, @"Closing the keyboard");
-                [keyInputField resignFirstResponder];
-                isInputingText = false;
-            } else {
-                Log(LOG_D, @"Opening the keyboard");
-                // Prepare the textbox used to capture keyboard events.
-                keyInputField.delegate = self;
-                keyInputField.text = @"0";
+            [self toggleKeyboard];
+        }
+    }
+}
+
+// GameParks v2.18: the keyboard the three-finger tap toggles, as
+// callable methods, so the stream screen's keyboard button and
+// the stream menu's Open Keyboard go through exactly the same
+// setup as the gesture.
+- (void)toggleKeyboard {
+    if (isInputingText) {
+        Log(LOG_D, @"Closing the keyboard");
+        [keyInputField resignFirstResponder];
+        isInputingText = false;
+    } else {
+        [self showKeyboard];
+    }
+}
+
+- (void)showKeyboard {
+    if (isInputingText) {
+        return;
+    }
+    Log(LOG_D, @"Opening the keyboard");
+    // Prepare the textbox used to capture keyboard events.
+    keyInputField.delegate = self;
+    keyInputField.text = @"0";
 #if !TARGET_OS_TV
                 // Prepare the toolbar above the keyboard for more options
                 UIToolbar *customToolbarView = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, self.bounds.size.width, 44)];
@@ -433,9 +463,6 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
                 [keyInputField.undoManager disableUndoRegistration];
                 
                 isInputingText = true;
-            }
-        }
-    }
 }
 
 - (UIBarButtonItem *)createButtonWithImageNamed:(NSString *)imageName backgroundColor:(UIColor *)backgroundColor target:(id)target action:(SEL)action keyCode:(NSInteger)keyCode isToggleable:(BOOL)isToggleable {

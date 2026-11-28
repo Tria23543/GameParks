@@ -120,6 +120,20 @@ enum GPSettingsStore {
         set { UserDefaults.standard.set(newValue, forKey: "GPDisplayAspectMode") }
     }
 
+    /// v2.18: the on-screen controller layout — 0 = PS5 (the
+    /// arrangement GameParks has always shipped), 1 = Xbox (left
+    /// stick high, D-pad below it). Device-only like the aspect
+    /// mode: it only steers the on-screen controls on this device,
+    /// so it lives in UserDefaults alongside GPDisplayAspectMode,
+    /// with this store as the one place that reads and writes it.
+    /// The stream view reads the same key ("GPControllerLayout")
+    /// when a stream connects; the in-stream menu and Settings →
+    /// Controls both write it here.
+    static var controllerLayout: Int {
+        get { UserDefaults.standard.integer(forKey: "GPControllerLayout") }
+        set { UserDefaults.standard.set(newValue, forKey: "GPControllerLayout") }
+    }
+
     /// A-18: the explicit row shown when there is no settings record.
     static func settingsUnavailableView() -> UIView {
         let view = GPMessageView()
@@ -166,6 +180,10 @@ final class GPSettingsViewController: GPBaseViewController {
 
     @objc private func stateChanged() {
         requestContentRebuild()
+    }
+
+    @objc private func settingsLayoutChanged(_ sender: UISegmentedControl) {
+        GPSettingsStore.controllerLayout = sender.selectedSegmentIndex
     }
 
     override func rebuildContent() {
@@ -252,6 +270,15 @@ final class GPSettingsViewController: GPBaseViewController {
             }
         }
         dynamicStack.addArrangedSubview(oscRow)
+
+        // Controller layout (v2.18): the same choice the stream
+        // menu offers — the PS5 or Xbox arrangement for the
+        // on-screen controller. A device preference, applied when
+        // a stream connects and live from the stream menu.
+        let layoutControl = gpSegmented(items: ["PS5", "Xbox"])
+        layoutControl.selectedSegmentIndex = min(max(GPSettingsStore.controllerLayout, 0), 1)
+        layoutControl.addTarget(self, action: #selector(settingsLayoutChanged(_:)), for: .valueChanged)
+        dynamicStack.addArrangedSubview(gpStreamPanelCard(title: "Controller layout", control: layoutControl))
 
         let statsRow = GPSwitchRow()
         statsRow.titleLabel.text = "Stats overlay"
@@ -620,6 +647,8 @@ func gpSegmented(items: [String]) -> UISegmentedControl {    let segmented = GPG
     func streamPanelDidChangeStatsOverlay(_ on: Bool)
     func streamPanelDidChangeOnScreenControls()
     func streamPanelRequestsStreamRestart()
+    func streamPanelDidChangeControllerLayout(_ layout: Int)
+    func streamPanelRequestsKeyboard()
 }
 
 /// The in-stream menu: the stream screen's hamburger button opens
@@ -744,6 +773,24 @@ final class GPStreamPanelViewController: UIViewController {
         aspect.selectedSegmentIndex = min(max(GPSettingsStore.displayAspectMode, 0), 5)
         aspect.addTarget(self, action: #selector(aspectChanged(_:)), for: .valueChanged)
         stack.addArrangedSubview(gpStreamPanelCard(title: "Aspect ratio", control: aspect))
+
+        // Controller (v2.18): the layout choice applies live and,
+        // like the aspect mode, is a device preference — so it
+        // sits above the settings-record guard below and works
+        // even when that record is missing.
+        stack.addArrangedSubview(gpSectionHeader("Controller"))
+        let layout = gpSegmented(items: ["PS5", "Xbox"])
+        layout.selectedSegmentIndex = min(max(GPSettingsStore.controllerLayout, 0), 1)
+        layout.addTarget(self, action: #selector(layoutChanged(_:)), for: .valueChanged)
+        stack.addArrangedSubview(gpStreamPanelCard(title: "Controller layout", control: layout))
+
+        // Typing (v2.18): the iPhone keyboard over the stream —
+        // what she types is sent to the PC.
+        stack.addArrangedSubview(gpSectionHeader("Typing"))
+        let keyboardButton = gpPrimaryButton("Open keyboard")
+        keyboardButton.addTarget(self, action: #selector(openKeyboardTapped), for: .touchUpInside)
+        keyboardButton.heightAnchor.constraint(equalToConstant: 48).isActive = true
+        stack.addArrangedSubview(keyboardButton)
 
         // A-18, same as the Settings screens: no settings record,
         // no silent no-op saves — say so and offer only what works
@@ -879,6 +926,20 @@ final class GPStreamPanelViewController: UIViewController {
     @objc private func aspectChanged(_ sender: UISegmentedControl) {
         GPSettingsStore.displayAspectMode = sender.selectedSegmentIndex
         delegate?.streamPanelDidChangeAspectMode(sender.selectedSegmentIndex)
+    }
+
+    @objc private func layoutChanged(_ sender: UISegmentedControl) {
+        GPSettingsStore.controllerLayout = sender.selectedSegmentIndex
+        delegate?.streamPanelDidChangeControllerLayout(sender.selectedSegmentIndex)
+    }
+
+    @objc private func openKeyboardTapped() {
+        // The panel leaves first so the keyboard comes up over
+        // the stream itself, then asks on its way out — the same
+        // pattern as Apply & restart stream.
+        dismiss(animated: true) { [weak self] in
+            self?.delegate?.streamPanelRequestsKeyboard()
+        }
     }
 
     @objc private func resolutionChanged(_ sender: UISegmentedControl) {

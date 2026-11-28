@@ -63,6 +63,10 @@
     // on-screen controls, so it stays reachable when the virtual
     // gamepad is hidden.
     UIButton *_menuButton;
+    // GameParks v2.18: the keyboard pill, third in the top row —
+    // same chrome family as the menu pill; opens the iPhone
+    // keyboard over the stream.
+    UIButton *_keyboardButton;
     // GameParks v2.12: the XStreaming-style stats strip — a
     // full-width bar pinned to the top of the screen carrying one
     // horizontal row of stats. It replaces the v2.11 top-left
@@ -290,6 +294,21 @@
     [_menuButton addTarget:self action:@selector(menuButtonPressed) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_menuButton];
 
+    // GameParks v2.18: the keyboard button — same pill chrome as
+    // the menu button, third in the centred top row. One tap opens
+    // the iPhone keyboard over the stream; typed text goes to the
+    // PC. Like the menu pill it lives on this view, never on the
+    // stream view, so it stays tappable with the gamepad hidden.
+    _keyboardButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_keyboardButton setTitle:@"⌨" forState:UIControlStateNormal];
+    [_keyboardButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _keyboardButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _keyboardButton.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
+    _keyboardButton.layer.cornerRadius = 22;
+    _keyboardButton.accessibilityLabel = @"Open keyboard";
+    [_keyboardButton addTarget:self action:@selector(keyboardButtonPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_keyboardButton];
+
     // GameParks v2.12: the stats strip — XStreaming's PerfPanel
     // horizontal style: translucent black at 0.7 panel opacity,
     // square corners, 10 pt white text, the row centred, 2 pt
@@ -334,6 +353,19 @@
     frame.size.height = 44;
     frame.size.width += 32;
     _menuButton.frame = frame;
+    // GameParks v2.18: the keyboard pill is sized identically.
+    [_keyboardButton sizeToFit];
+    CGRect keyboardFrame = _keyboardButton.frame;
+    keyboardFrame.size.height = 44;
+    keyboardFrame.size.width += 32;
+    _keyboardButton.frame = keyboardFrame;
+}
+
+// GameParks v2.18: the keyboard pill and the stream menu's Open
+// Keyboard both land here in effect — show the iPhone keyboard
+// over the stream (the same one the three-finger tap toggles).
+- (void)keyboardButtonPressed {
+    [_streamView showKeyboard];
 }
 
 - (void)menuButtonPressed {
@@ -396,6 +428,19 @@
     // The new level is already persisted by the panel; re-apply it
     // to the live controls exactly as stream setup did.
     [_streamView gpApplyOnScreenControlsFromSettings:_controllerSupport];
+}
+
+- (void)streamPanelDidChangeControllerLayout:(NSInteger)layout {
+    // The choice is already persisted by the panel; apply it to
+    // the live on-screen controls, which redraw in place.
+    [_streamView setOnScreenControllerLayout:layout];
+}
+
+- (void)streamPanelRequestsKeyboard {
+    // The panel has dismissed itself; open the keyboard over the
+    // stream — the same one the ⌨ pill and the three-finger tap
+    // bring up.
+    [_streamView showKeyboard];
 }
 
 - (void)streamPanelRequestsStreamRestart {
@@ -525,15 +570,20 @@
             }
         }
         // GameParks v2.11: the exit and menu pills sit as one
-        // centred pair, menu on the left.
+        // centred row, menu on the left. v2.18 adds the keyboard
+        // pill between them.
         CGFloat pairGap = 8;
-        CGFloat pairWidth = _menuButton.frame.size.width + pairGap + _exitButton.frame.size.width;
+        CGFloat pairWidth = _menuButton.frame.size.width + pairGap + _keyboardButton.frame.size.width + pairGap + _exitButton.frame.size.width;
         CGRect menuFrame = _menuButton.frame;
         menuFrame.origin.x = (bounds.size.width - pairWidth) / 2;
         menuFrame.origin.y = pairY;
         _menuButton.frame = menuFrame;
+        CGRect keyboardFrame = _keyboardButton.frame;
+        keyboardFrame.origin.x = menuFrame.origin.x + menuFrame.size.width + pairGap;
+        keyboardFrame.origin.y = pairY;
+        _keyboardButton.frame = keyboardFrame;
         CGRect buttonFrame = _exitButton.frame;
-        buttonFrame.origin.x = menuFrame.origin.x + menuFrame.size.width + pairGap;
+        buttonFrame.origin.x = keyboardFrame.origin.x + keyboardFrame.size.width + pairGap;
         buttonFrame.origin.y = pairY;
         _exitButton.frame = buttonFrame;
     }

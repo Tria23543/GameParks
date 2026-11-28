@@ -69,6 +69,8 @@
     Controller *_controller;
     NSMutableArray* _deadTouches;
     BOOL _swapABXY;
+    // GameParks v2.18: 0 = PS5 arrangement, 1 = Xbox arrangement.
+    NSInteger _controllerLayout;
 }
 
 static const float EDGE_WIDTH = .05;
@@ -197,6 +199,38 @@ static float L3_Y;
     return _level;
 }
 
+// GameParks v2.18: switch the Full layout between the PS5
+// arrangement (0, the default) and the Xbox arrangement (1).
+// Redraws in place when the controls are on screen.
+- (void) setControllerLayout:(NSInteger)layout {
+    _controllerLayout = layout;
+
+    // Only update controls if we're showing, otherwise
+    // show will do it for us.
+    if (_visible) {
+        [self updateControls];
+    }
+}
+
+// GameParks v2.18: the Xbox arrangement. Starts from the complex
+// layout so the bumpers, triggers, start/select and every size
+// stay identical — only three centres move: the left stick goes
+// high, the D-pad sits below it, and the ABXY cluster rises on
+// the right, above the right stick. Touch-down hit-tests the
+// drawn layers in button-before-stick order and the stick
+// tracking reads these same centres, so input follows on its own.
+- (void) setupXboxControls
+{
+    [self setupComplexControls];
+
+    LS_CENTER_X = _controlArea.size.width * .16 + _controlArea.origin.x;
+    LS_CENTER_Y = _controlArea.size.height * .38 + _controlArea.origin.y;
+    D_PAD_CENTER_X = _controlArea.size.width * .30 + _controlArea.origin.x;
+    D_PAD_CENTER_Y = _controlArea.size.height * .74 + _controlArea.origin.y;
+    BUTTON_CENTER_X = _controlArea.size.width * .89 + _controlArea.origin.x;
+    BUTTON_CENTER_Y = _controlArea.size.height * .38 + _controlArea.origin.y;
+}
+
 - (void) updateControls {
     switch (_level) {
         case OnScreenControlsLevelOff:
@@ -253,7 +287,16 @@ static float L3_Y;
             [self drawButtons];
             break;
         case OnScreenControlsLevelFull:
-            [self setupComplexControls];
+            // GameParks v2.18: the Full layout is the one the
+            // layout choice steers — PS5 (0) is the arrangement
+            // GameParks has always shipped; Xbox (1) moves the
+            // centres. The Auto levels above complement a physical
+            // controller and keep their own layouts.
+            if (_controllerLayout == 1) {
+                [self setupXboxControls];
+            } else {
+                [self setupComplexControls];
+            }
             
             [self drawButtons];
             [self drawStartSelect];
