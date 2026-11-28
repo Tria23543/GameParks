@@ -1,0 +1,22 @@
+{
+  "images": [
+    {
+      "idiom": "universal",
+      "scale": "1x",
+      "filename": "ps_triangle_80x80@2x.png"
+    },
+    {
+      "idiom": "universal",
+      "scale": "2x",
+      "filename": "ps_triangle_120x120@3x.png"
+    },
+    {
+      "idiom": "universal",
+      "scale": "3x"
+    }
+  ],
+  "info": {
+    "version": 1,
+    "author": "xcode"
+  }
+}

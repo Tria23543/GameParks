@@ -71,6 +71,9 @@
     BOOL _swapABXY;
     // GameParks v2.18: 0 = PS5 arrangement, 1 = Xbox arrangement.
     NSInteger _controllerLayout;
+    // GameParks v2.20: the controller-body shell behind the Full
+    // layout's controls, from the approved colour design.
+    CAShapeLayer* _shellLayer;
 }
 
 static const float EDGE_WIDTH = .05;
@@ -255,6 +258,11 @@ static float L3_Y;
 }
 
 - (void) updateControls {
+    // GameParks v2.20: the controller-body shell belongs to the Full
+    // layout only — every other level takes it away again.
+    if (_level != OnScreenControlsLevelFull) {
+        [self removeShell];
+    }
     switch (_level) {
         case OnScreenControlsLevelOff:
             [self hideButtons];
@@ -321,6 +329,9 @@ static float L3_Y;
                 [self setupComplexControls];
             }
             
+            // The shell goes in first so every control drawn after
+            // it in this pass sits on top of the body.
+            [self drawShell];
             [self drawButtons];
             [self drawStartSelect];
             [self drawBumpers];
@@ -332,6 +343,85 @@ static float L3_Y;
             Log(LOG_W, @"Unknown on-screen controls level: %d", (int)_level);
             break;
     }
+}
+
+// GameParks v2.20: the controller-body shell from the approved colour
+// design — a soft translucent silhouette behind the Full layout's
+// controls, shaped like the selected controller. The outline points
+// (fractions of the view) are one half of the body, from top centre
+// around the right side to bottom centre; the path mirrors them for
+// the left side and smooths the outline with a Catmull-Rom spline.
+- (UIBezierPath*) gpShellPathInSize:(CGSize)size {
+    static const CGFloat xboxHalf[][2] = {
+        {0.50, 0.135}, {0.60, 0.128}, {0.72, 0.132}, {0.83, 0.148},
+        {0.905, 0.185}, {0.955, 0.255}, {0.98, 0.36}, {0.982, 0.50},
+        {0.962, 0.66}, {0.93, 0.82}, {0.875, 0.935}, {0.815, 0.978},
+        {0.772, 0.955}, {0.735, 0.875}, {0.70, 0.775}, {0.655, 0.715},
+        {0.585, 0.688}, {0.50, 0.678}
+    };
+    static const CGFloat psHalf[][2] = {
+        {0.50, 0.15}, {0.62, 0.145}, {0.75, 0.15}, {0.86, 0.175},
+        {0.93, 0.23}, {0.968, 0.33}, {0.978, 0.47}, {0.962, 0.62},
+        {0.935, 0.76}, {0.905, 0.88}, {0.872, 0.955}, {0.835, 0.975},
+        {0.80, 0.94}, {0.765, 0.875}, {0.72, 0.855}, {0.64, 0.845},
+        {0.56, 0.85}, {0.50, 0.855}
+    };
+    const CGFloat (*half)[2] = (_controllerLayout == 1) ? xboxHalf : psHalf;
+    const NSInteger halfCount = 18;
+    
+    NSMutableArray* outline = [NSMutableArray array];
+    for (NSInteger i = 0; i < halfCount; i++) {
+        [outline addObject:[NSValue valueWithCGPoint:CGPointMake(half[i][0] * size.width, half[i][1] * size.height)]];
+    }
+    for (NSInteger i = halfCount - 2; i >= 1; i--) {
+        [outline addObject:[NSValue valueWithCGPoint:CGPointMake((1.0 - half[i][0]) * size.width, half[i][1] * size.height)]];
+    }
+    [outline addObject:outline.firstObject];
+    
+    // Catmull-Rom sampling, the same smoothing as the design pictures.
+    NSMutableArray* ext = [NSMutableArray array];
+    [ext addObject:outline.firstObject];
+    [ext addObjectsFromArray:outline];
+    [ext addObject:outline.lastObject];
+    UIBezierPath* path = [UIBezierPath bezierPath];
+    BOOL started = NO;
+    for (NSInteger i = 0; i + 3 < (NSInteger)ext.count; i++) {
+        CGPoint p0 = [ext[i] CGPointValue];
+        CGPoint p1 = [ext[i + 1] CGPointValue];
+        CGPoint p2 = [ext[i + 2] CGPointValue];
+        CGPoint p3 = [ext[i + 3] CGPointValue];
+        for (NSInteger j = 0; j < 10; j++) {
+            CGFloat t = j / 10.0;
+            CGFloat t2 = t * t;
+            CGFloat t3 = t2 * t;
+            CGPoint pt = CGPointMake(
+                0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+                0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3));
+            if (!started) {
+                [path moveToPoint:pt];
+                started = YES;
+            } else {
+                [path addLineToPoint:pt];
+            }
+        }
+    }
+    [path closePath];
+    return path;
+}
+
+- (void) drawShell {
+    if (_shellLayer == nil) {
+        _shellLayer = [CAShapeLayer layer];
+        _shellLayer.fillColor = [UIColor colorWithRed:15.0/255.0 green:17.0/255.0 blue:26.0/255.0 alpha:0.52].CGColor;
+        _shellLayer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.20].CGColor;
+        _shellLayer.lineWidth = 1.5;
+    }
+    _shellLayer.path = [self gpShellPathInSize:_view.bounds.size].CGPath;
+    [_view.layer addSublayer:_shellLayer];
+}
+
+- (void) removeShell {
+    [_shellLayer removeFromSuperlayer];
 }
 
 // For GCExtendedGamepad controls we move start, select, L3, and R3 to the button
@@ -459,10 +549,16 @@ static float L3_Y;
 }
 
 - (void) drawButtons {
-    UIImage* aButtonImage = [UIImage imageNamed:@"AButton"];
-    UIImage* bButtonImage = [UIImage imageNamed:@"BButton"];
-    UIImage* xButtonImage = [UIImage imageNamed:@"XButton"];
-    UIImage* yButtonImage = [UIImage imageNamed:@"YButton"];
+    // GameParks v2.20 colour artwork: the Xbox layout uses the
+    // coloured ABXY set; the PS5 layout uses the coloured PlayStation
+    // symbols (Cross in the A position, Circle for B, Square for X,
+    // Triangle for Y). Same sizes as the buttons they replace, so the
+    // cluster geometry is unchanged.
+    BOOL xboxLayout = (_controllerLayout == 1);
+    UIImage* aButtonImage = [UIImage imageNamed:(xboxLayout ? @"XboxA" : @"PsCross")];
+    UIImage* bButtonImage = [UIImage imageNamed:(xboxLayout ? @"XboxB" : @"PsCircle")];
+    UIImage* xButtonImage = [UIImage imageNamed:(xboxLayout ? @"XboxX" : @"PsSquare")];
+    UIImage* yButtonImage = [UIImage imageNamed:(xboxLayout ? @"XboxY" : @"PsTriangle")];
     
     CGRect aButtonFrame = CGRectMake(BUTTON_CENTER_X - aButtonImage.size.width / 2, BUTTON_CENTER_Y + BUTTON_DIST, aButtonImage.size.width, aButtonImage.size.height);
     CGRect bButtonFrame = CGRectMake(BUTTON_CENTER_X + BUTTON_DIST, BUTTON_CENTER_Y - bButtonImage.size.height / 2, bButtonImage.size.width, bButtonImage.size.height);
@@ -515,14 +611,17 @@ static float L3_Y;
 }
 
 - (void) drawStartSelect {
+    // GameParks v2.20: in the Xbox layout these are View and Menu,
+    // like a real Xbox controller; the PS5 layout keeps Start/Select.
+    BOOL xboxLayout = (_controllerLayout == 1);
     // create Start button
-    UIImage* startButtonImage = [UIImage imageNamed:@"StartButton"];
+    UIImage* startButtonImage = [UIImage imageNamed:(xboxLayout ? @"MenuButton" : @"StartButton")];
     _startButton.frame = CGRectMake(START_X - startButtonImage.size.width / 2, START_Y - startButtonImage.size.height / 2, startButtonImage.size.width, startButtonImage.size.height);
     _startButton.contents = (id) startButtonImage.CGImage;
     [_view.layer addSublayer:_startButton];
     
     // create Select button
-    UIImage* selectButtonImage = [UIImage imageNamed:@"SelectButton"];
+    UIImage* selectButtonImage = [UIImage imageNamed:(xboxLayout ? @"ViewButton" : @"SelectButton")];
     _selectButton.frame = CGRectMake(SELECT_X - selectButtonImage.size.width / 2, SELECT_Y - selectButtonImage.size.height / 2, selectButtonImage.size.width, selectButtonImage.size.height);
     _selectButton.contents = (id) selectButtonImage.CGImage;
     [_view.layer addSublayer:_selectButton];
