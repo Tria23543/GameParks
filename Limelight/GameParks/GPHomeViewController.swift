@@ -277,11 +277,15 @@ final class GPHomeViewController: GPBaseViewController {
             : "Last played \(lastPlayedDisplay)"
         let subtitleLabel = gpLabel(subtitle, font: GPFont.body(13), color: GPColor.textSecondary, lines: 2)
 
-        let playPill = gpLabel("  ▶  Play  ", font: GPFont.display(14, weight: .bold), color: GPColor.onAccent, lines: 1)
+        // v2.15: the pill is a real capsule button — fixed 34pt
+        // height, fully rounded ends, honest padding — instead of a
+        // label hugging its own text.
+        let playPill = gpLabel("    ▶  Play    ", font: GPFont.display(14, weight: .bold), color: GPColor.onAccent, lines: 1)
         playPill.backgroundColor = GPColor.accent
-        playPill.layer.cornerRadius = 10
+        playPill.layer.cornerRadius = 17
         playPill.clipsToBounds = true
         playPill.textAlignment = .center
+        playPill.heightAnchor.constraint(equalToConstant: 34).isActive = true
         let pillRow = UIStackView(arrangedSubviews: [playPill, UIView()])
         pillRow.axis = .horizontal
         // v2.14: the pill keeps its natural height even if the row
@@ -301,34 +305,30 @@ final class GPHomeViewController: GPBaseViewController {
             poster.clipsToBounds = true
             poster.layer.cornerRadius = 14
             poster.isUserInteractionEnabled = false
-            poster.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            // v2.14: the text block is the card's only height
-            // driver. The poster's own image is 600x900pt; at
-            // defaultLow its intrinsic height could win the row's
-            // height and stretch the text stack — and the Play
-            // pill inside it — to match (the v2.13 slab). At
-            // priority 1 the poster always yields instead.
-            poster.setContentHuggingPriority(UILayoutPriority(1), for: .vertical)
-            poster.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            poster.setContentCompressionResistancePriority(UILayoutPriority(1), for: .vertical)
 
             let textStack = UIStackView(arrangedSubviews: [nameLabel, subtitleLabel, pillRow])
             textStack.axis = .vertical
             textStack.spacing = 6
-            textStack.setContentHuggingPriority(.required, for: .vertical)
 
             let row = UIStackView(arrangedSubviews: [poster, textStack])
             row.axis = .horizontal
             row.spacing = 12
+            // v2.15 (Design A, picked by Glenda from the mock): the
+            // text block keeps its natural height and sits centred
+            // against the poster — no slack anywhere in the card
+            // for the pill to float in.
+            row.alignment = .center
             card.stack.addArrangedSubview(row)
 
             NSLayoutConstraint.activate([
-                // The poster spans the text block's height and
-                // keeps GPPosterView's art proportion (height =
-                // width x 1.42); the card's height stays driven by
-                // the text block, as before.
-                poster.heightAnchor.constraint(equalTo: textStack.heightAnchor),
-                poster.widthAnchor.constraint(equalTo: poster.heightAnchor, multiplier: 1.0 / 1.42),
+                // v2.15: the poster has one fixed size — 104pt
+                // wide at GPPosterView's art proportion (height =
+                // width x 1.42). It no longer negotiates the
+                // card's height with the text block at all; that
+                // negotiation caused the v2.13 slab and the
+                // v2.14 float.
+                poster.widthAnchor.constraint(equalToConstant: 104),
+                poster.heightAnchor.constraint(equalTo: poster.widthAnchor, multiplier: 1.42),
             ])
         } else {
             card.stack.addArrangedSubview(nameLabel)
