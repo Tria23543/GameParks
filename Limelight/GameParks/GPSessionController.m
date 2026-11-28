@@ -1426,14 +1426,36 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
     return nil;
 }
 
-/// GameParks v2.16: see the header for why this exists. The quit
-/// request runs on the session controller's own background queue
-/// (inside quitApp:onHost:completion:), so the stream's teardown
-/// is never blocked on it.
+/// GameParks v2.16: see the header for why this exists.
+/// GameParks v2.17: the quit is no longer sent immediately. The
+/// caller is leaving the stream, and its pop restarts discovery —
+/// that first poll should meet a host that is simply idle. v2.16
+/// sent the quit at once: quitApp: had the host paused while
+/// discovery restarted, so startDiscovery skipped it, and the one
+/// poll left ran while the host was still ending the session.
+/// When that poll missed, nothing ever polled again (workers are
+/// one-shot; there is no periodic re-poll) and Home showed the PC
+/// offline. So: wait a beat, let the restart land, then quit —
+/// and poll once more after the quit, when the host has settled.
 - (void)endSessionForConfig:(StreamConfiguration *)config {
     if (config == nil || config.serverCert == nil || config.appID == nil) {
         return;
     }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // A new stream starting within the beat means the user
+        // changed their mind — never quit from under it.
+        if (self->_streamActive) {
+            return;
+        }
+        [self gpEndSessionForConfigNow:config];
+    });
+}
+
+/// Resolve the config's host/app (the restart lookup's rules) and
+/// send the quit. Runs on a background queue; quitApp: does its
+/// own HTTP there and calls back on the main queue.
+- (void)gpEndSessionForConfigNow:(StreamConfiguration *)config {
     for (TemporaryHost *host in self.hosts) {
         if (host.serverCert == nil || ![host.serverCert isEqual:config.serverCert]) {
             continue;
@@ -1443,6 +1465,16 @@ NSString * const GPHostInfoErrorMessageKey = @"message";
                 app.host = host;
                 [self quitApp:app onHost:host completion:^(BOOL success) {
                     Log(LOG_I, @"GameParks: end-session request for %@ %@", app.name, success ? @"succeeded" : @"did not complete");
+                    // Poll once more, a few seconds on, when the
+                    // host has finished ending the session — so
+                    // Home's online state is set by a poll that met
+                    // a settled host. resumeDiscoveryForHost:
+                    // starts a poll when none is running.
+                    TemporaryHost *hostToRepoll = host;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        [self->_discMan resumeDiscoveryForHost:hostToRepoll];
+                    });
                 }];
                 return;
             }
