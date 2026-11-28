@@ -212,23 +212,46 @@ static float L3_Y;
     }
 }
 
-// GameParks v2.18: the Xbox arrangement. Starts from the complex
-// layout so the bumpers, triggers, start/select and every size
-// stay identical — only three centres move: the left stick goes
-// high, the D-pad sits below it, and the ABXY cluster rises on
-// the right, above the right stick. Touch-down hit-tests the
-// drawn layers in button-before-stick order and the stick
-// tracking reads these same centres, so input follows on its own.
+// GameParks v2.19: the Xbox arrangement, reorganised to the
+// XStreaming / real-Xbox-controller design she approved (v2.18's
+// first arrangement crowded the ABXY cluster into R1 and left
+// the D-pad floating mid-screen). Starts from the complex layout
+// so every size stays identical — only the centres move:
+// shoulders stacked at the top corners (drawBumpers and
+// drawTriggers also swap in the LT/LB/RB/RT artwork for this
+// layout), left stick mid-left with the D-pad tucked into the
+// bottom-left corner below it, the ABXY diamond on the right
+// with the right stick low, and View/Menu (Select/Start)
+// together at the bottom centre. Touch-down hit-tests the drawn
+// layers in button-before-stick order and the stick tracking
+// reads these same centres, so input follows on its own.
 - (void) setupXboxControls
 {
     [self setupComplexControls];
 
-    LS_CENTER_X = _controlArea.size.width * .16 + _controlArea.origin.x;
-    LS_CENTER_Y = _controlArea.size.height * .38 + _controlArea.origin.y;
-    D_PAD_CENTER_X = _controlArea.size.width * .30 + _controlArea.origin.x;
-    D_PAD_CENTER_Y = _controlArea.size.height * .74 + _controlArea.origin.y;
-    BUTTON_CENTER_X = _controlArea.size.width * .89 + _controlArea.origin.x;
-    BUTTON_CENTER_Y = _controlArea.size.height * .38 + _controlArea.origin.y;
+    L2_X = _controlArea.size.width * .06 + _controlArea.origin.x;
+    L2_Y = _controlArea.size.height * .10 + _controlArea.origin.y;
+    L1_X = _controlArea.size.width * .06 + _controlArea.origin.x;
+    L1_Y = _controlArea.size.height * .26 + _controlArea.origin.y;
+    R2_X = _controlArea.size.width * .94 + _controlArea.origin.x;
+    R2_Y = _controlArea.size.height * .10 + _controlArea.origin.y;
+    R1_X = _controlArea.size.width * .94 + _controlArea.origin.x;
+    R1_Y = _controlArea.size.height * .26 + _controlArea.origin.y;
+
+    LS_CENTER_X = _controlArea.size.width * .18 + _controlArea.origin.x;
+    LS_CENTER_Y = _controlArea.size.height * .57 + _controlArea.origin.y;
+    D_PAD_CENTER_X = _controlArea.size.width * .10 + _controlArea.origin.x;
+    D_PAD_CENTER_Y = _controlArea.size.height * .80 + _controlArea.origin.y;
+
+    RS_CENTER_X = _controlArea.size.width * .72 + _controlArea.origin.x;
+    RS_CENTER_Y = _controlArea.size.height * .66 + _controlArea.origin.y;
+    BUTTON_CENTER_X = _controlArea.size.width * .885 + _controlArea.origin.x;
+    BUTTON_CENTER_Y = _controlArea.size.height * .62 + _controlArea.origin.y;
+
+    SELECT_X = _controlArea.size.width * .44 + _controlArea.origin.x;
+    SELECT_Y = _controlArea.size.height * .905 + _controlArea.origin.y;
+    START_X = _controlArea.size.width * .56 + _controlArea.origin.x;
+    START_Y = _controlArea.size.height * .905 + _controlArea.origin.y;
 }
 
 - (void) updateControls {
@@ -506,28 +529,31 @@ static float L3_Y;
 }
 
 - (void) drawBumpers {
+    // GameParks v2.19: the Xbox layout names its shoulders the
+    // Xbox way — same circle artwork, same sizes, LT/LB/RB/RT
+    // imagesets alongside the originals.
     // create L1 button
-    UIImage* l1ButtonImage = [UIImage imageNamed:@"L1"];
+    UIImage* l1ButtonImage = [UIImage imageNamed:(_controllerLayout == 1 ? @"LB" : @"L1")];
     _l1Button.frame = CGRectMake(L1_X - l1ButtonImage.size.width / 2, L1_Y - l1ButtonImage.size.height / 2, l1ButtonImage.size.width, l1ButtonImage.size.height);
     _l1Button.contents = (id) l1ButtonImage.CGImage;
     [_view.layer addSublayer:_l1Button];
     
     // create R1 button
-    UIImage* r1ButtonImage = [UIImage imageNamed:@"R1"];
+    UIImage* r1ButtonImage = [UIImage imageNamed:(_controllerLayout == 1 ? @"RB" : @"R1")];
     _r1Button.frame = CGRectMake(R1_X - r1ButtonImage.size.width / 2, R1_Y - r1ButtonImage.size.height / 2, r1ButtonImage.size.width, r1ButtonImage.size.height);
     _r1Button.contents = (id) r1ButtonImage.CGImage;
     [_view.layer addSublayer:_r1Button];
 }
 
 - (void) drawTriggers {
-    // create L2 button
-    UIImage* l2ButtonImage = [UIImage imageNamed:@"L2"];
+    // create L2 button (LT in the Xbox layout, as in drawBumpers)
+    UIImage* l2ButtonImage = [UIImage imageNamed:(_controllerLayout == 1 ? @"LT" : @"L2")];
     _l2Button.frame = CGRectMake(L2_X - l2ButtonImage.size.width / 2, L2_Y - l2ButtonImage.size.height / 2, l2ButtonImage.size.width, l2ButtonImage.size.height);
     _l2Button.contents = (id) l2ButtonImage.CGImage;
     [_view.layer addSublayer:_l2Button];
     
     // create R2 button
-    UIImage* r2ButtonImage = [UIImage imageNamed:@"R2"];
+    UIImage* r2ButtonImage = [UIImage imageNamed:(_controllerLayout == 1 ? @"RT" : @"R2")];
     _r2Button.frame = CGRectMake(R2_X - r2ButtonImage.size.width / 2, R2_Y - r2ButtonImage.size.height / 2, r2ButtonImage.size.width, r2ButtonImage.size.height);
     _r2Button.contents = (id) r2ButtonImage.CGImage;
     [_view.layer addSublayer:_r2Button];
